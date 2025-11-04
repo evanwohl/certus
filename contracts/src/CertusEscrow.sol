@@ -2,9 +2,29 @@
 pragma solidity ^0.8.23;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+interface IStylusWasmExecutor {
+    function execute(
+        bytes calldata wasm,
+        bytes calldata input,
+        uint64 fuelLimit,
+        uint64 memLimit
+    ) external returns (bytes memory output);
+}
+
+interface IVRFCoordinator {
+    function requestRandomWords(
+        bytes32 keyHash,
+        uint64 subId,
+        uint16 requestConfirmations,
+        uint32 callbackGasLimit,
+        uint32 numWords
+    ) external returns (uint256 requestId);
+}
 
 /**
  * @title CertusEscrow
@@ -30,9 +50,24 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     uint256 public constant VERIFIER_BOUNTY_PCT = 20; // 20% of slashed collateral
     uint256 public constant EXECUTOR_COLLATERAL_MULTIPLIER = 200; // Fixed 2.0x for all executors
 
-    uint256 public clientDepositUsd = 5 * 10**6; // 5 USDC (6 decimals)
+    uint256 public clientDepositBasisPoints = 500; // 5% of payAmt (500/10000)
+    uint256 public minClientDepositUsd = 5 * 10**6; // Minimum $5 USDC (6 decimals)
+    uint256 public maxClientDepositUsd = 1000 * 10**6; // Maximum $1000 USDC (6 decimals)
     uint256 public challengeWindow = 3600; // 1 hour
     uint256 public acceptWindow = 120; // 2 minutes
+
+    address public stylusExecutor; // Arbitrum Stylus Wasm executor contract
+    address public vrfCoordinator; // Chainlink VRF coordinator
+    bytes32 public vrfKeyHash; // Chainlink VRF key hash
+    uint64 public vrfSubId; // Chainlink VRF subscription ID
+    address public treasury; // Protocol treasury for slashing remainder
+
+    mapping(address => uint8) public tokenDecimals; // Store decimals for supported tokens
+    mapping(address => bool) public supportedTokens; // Whitelist of payment tokens
+
+    mapping(uint256 => bytes32) public vrfRequestToJobId; // VRF request ID => job ID
+    mapping(bytes32 => uint256) public jobIdToVrfRequest; // job ID => VRF request ID
+    mapping(bytes32 => uint256[]) public jobIdToRandomWords; // job ID => random words from VRF
 
     // ============================================================================
     // Enums & Structs
@@ -79,6 +114,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
 
     struct VerifierStake {
         uint256 stake;              // Minimum $1000 USDC locked
+        address stakeToken;         // Token used for stake (enforced to match job payToken during selection)
         bytes32[] dataCache;        // Data hashes verifier commits to caching
         uint256 storageCapacity;    // GB committed (e.g., 50GB)
         uint256 missedChallenges;   // Slash if > 3 in 30 days
@@ -142,6 +178,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     uint256 public constant NETWORK_PARTITION_THRESHOLD = 50; // Grace if >50% miss challenge
     uint256 public constant EXECUTOR_BAN_DURATION = 30 days; // 30-day ban after 1st fraud
     uint256 public constant MAX_FRAUD_ATTEMPTS = 1; // Permanent ban after 2nd fraud
+    uint256 public constant MAX_VERIFIER_SELECTION_ATTEMPTS = 200; // Cap iterations for gas safety
+    uint256 public constant VRF_RETRY_GRACE_PERIOD = 15 minutes; // Grace period before VRF retry allowed
 
     // ============================================================================
     // Events
@@ -150,10 +188,12 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     event WasmRegistered(bytes32 indexed wasmHash, uint256 size, bytes32 testVectorHash);
     event JobCreated(bytes32 indexed jobId, address indexed client, bytes32 wasmHash, uint256 payAmt);
     event JobAccepted(bytes32 indexed jobId, address indexed executor, uint256 deposit);
-    event ReceiptSubmitted(bytes32 indexed jobId, bytes32 outputHash, bytes executorSig, address[3] selectedVerifiers);
+    event ReceiptSubmitted(bytes32 indexed jobId, bytes32 outputHash, bytes executorSig);
+    event VerifiersSelected(bytes32 indexed jobId, address[3] selectedVerifiers, address[3] backupVerifiers);
     event JobFinalized(bytes32 indexed jobId, address indexed executor, uint256 payment);
     event TimeoutClaimed(bytes32 indexed jobId, address indexed executor, uint256 payment);
     event FraudDetected(bytes32 indexed jobId, address indexed executor, address verifier, uint256 slashed);
+    event VerifierSlashed(bytes32 indexed jobId, address indexed verifier, address indexed reporter, uint256 penalty);
     event JobCancelled(bytes32 indexed jobId);
     event VerifierRegistered(address indexed verifier, uint256 stake, uint256 storageGB);
     event VerifierUnregistered(address indexed verifier, uint256 refundedStake);
@@ -164,6 +204,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     event ClientBanned(address indexed client, uint256 griefCount);
     event VerifierHeartbeat(address indexed verifier, uint256 timestamp);
     event BackupVerifierActivated(bytes32 indexed jobId, address indexed backup, address indexed replaced);
+    event TokenSupported(address indexed token, uint8 decimals);
+    event TokenRemoved(address indexed token);
     event ExecutorReputationUpdated(address indexed executor, uint256 fraudAttempts, uint256 newMultiplier);
     event NetworkPartitionDetected(bytes32 indexed jobId, uint256 missedCount, uint256 totalVerifiers);
     event ExecutorBanned(address indexed executor, uint256 banUntil, bool permanent);
@@ -172,7 +214,33 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     // Constructor
     // ============================================================================
 
-    constructor() Ownable(msg.sender) {}
+    constructor(
+        address _stylusExecutor,
+        address _vrfCoordinator,
+        bytes32 _vrfKeyHash,
+        uint64 _vrfSubId,
+        address _treasury,
+        address[] memory _supportedTokens
+    ) Ownable(msg.sender) {
+        require(_stylusExecutor != address(0), "Invalid Stylus executor");
+        require(_vrfCoordinator != address(0), "Invalid VRF coordinator");
+        require(_treasury != address(0), "Invalid treasury");
+        stylusExecutor = _stylusExecutor;
+        vrfCoordinator = _vrfCoordinator;
+        vrfKeyHash = _vrfKeyHash;
+        vrfSubId = _vrfSubId;
+        treasury = _treasury;
+
+        // Initialize supported tokens with their decimals
+        for (uint256 i = 0; i < _supportedTokens.length; i++) {
+            address token = _supportedTokens[i];
+            require(token != address(0), "Invalid token address");
+            uint8 decimals = IERC20Metadata(token).decimals();
+            tokenDecimals[token] = decimals;
+            supportedTokens[token] = true;
+            emit TokenSupported(token, decimals);
+        }
+    }
 
     // ============================================================================
     // Wasm Storage Functions
@@ -259,11 +327,27 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(wasmModules[wasmHash].length > 0, "Wasm not registered");
         require(payAmt > 0, "Payment must be > 0");
         require(acceptDeadline > block.timestamp, "Accept deadline in past");
+        require(acceptDeadline <= block.timestamp + acceptWindow, "Accept window too long");
         require(finalizeDeadline > acceptDeadline, "Finalize must be after accept");
         require(payToken != address(0), "Invalid token");
+        require(supportedTokens[payToken], "Token not supported");
         require(clientGriefCount[msg.sender] < MAX_GRIEF_COUNT, "Client banned for griefing");
 
-        uint256 clientDeposit = clientDepositUsd; // Assume same decimals as stablecoin
+        // Resource limits to prevent DoS on on-chain execution
+        require(fuelLimit > 0 && fuelLimit <= 100_000_000, "Fuel limit out of range");
+        require(memLimit > 0 && memLimit <= 1024 * 1024 * 1024, "Memory limit out of range");
+        require(maxOutputSize > 0 && maxOutputSize <= 10 * 1024 * 1024, "Output size out of range");
+
+        // Calculate proportional client deposit (5% of payAmt, min $5, max $1000)
+        uint8 decimals = tokenDecimals[payToken];
+        uint256 proportionalDeposit = (payAmt * clientDepositBasisPoints) / 10000;
+        uint256 minDeposit = _normalizeAmount(minClientDepositUsd, 6, decimals);
+        uint256 maxDeposit = _normalizeAmount(maxClientDepositUsd, 6, decimals);
+
+        uint256 clientDeposit = proportionalDeposit;
+        if (clientDeposit < minDeposit) clientDeposit = minDeposit;
+        if (clientDeposit > maxDeposit) clientDeposit = maxDeposit;
+
         uint256 totalClientPayment = payAmt + clientDeposit;
 
         // Transfer client payment + deposit
@@ -317,8 +401,10 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(block.timestamp >= rep.banUntil, "Executor temporarily banned");
 
         // Fixed 2.0x collateral (200 / 100 = 2.0)
+        // Overflow protection: ensure payAmt doesn't overflow when multiplied
+        require(job.payAmt <= type(uint256).max / EXECUTOR_COLLATERAL_MULTIPLIER, "Payment amount too large");
         uint256 executorDeposit = (job.payAmt * EXECUTOR_COLLATERAL_MULTIPLIER) / 100;
-        require(executorDeposit >= job.payAmt * 2, "Collateral must be exactly 2.0x payAmt");
+        require(executorDeposit == job.payAmt * 2, "Collateral must be exactly 2.0x payAmt");
 
         // Transfer executor deposit
         IERC20(job.payToken).safeTransferFrom(msg.sender, address(this), executorDeposit);
@@ -336,8 +422,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
      * @param outputHash SHA256 hash of the output
      * @param execSig Ed25519 signature over canonical receipt
      *
-     * @dev Randomly selects 3 verifiers who must verify this job
-     * Uses block data for randomness (sufficient for Sybil resistance)
+     * @dev Requests Chainlink VRF for secure random verifier selection
      */
     function submitReceipt(
         bytes32 jobId,
@@ -353,13 +438,80 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         job.outputHash = outputHash;
         job.status = Status.Receipt;
         job.finalizeDeadline = uint64(block.timestamp) + uint64(challengeWindow);
-        receiptTimestamp[jobId] = block.timestamp; // Track when receipt submitted
+        receiptTimestamp[jobId] = block.timestamp;
 
-        // CRITICAL: Randomly select 3 primary + 3 backup verifiers
-        job.selectedVerifiers = _selectRandomVerifiers(jobId, job.wasmHash);
-        job.backupVerifiers = _selectBackupVerifiers(jobId, job.selectedVerifiers);
+        // Request Chainlink VRF for verifier selection
+        uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
+            vrfKeyHash,
+            vrfSubId,
+            3, // 3 confirmations
+            500000, // callback gas limit
+            2 // request 2 random words
+        );
 
-        emit ReceiptSubmitted(jobId, outputHash, execSig, job.selectedVerifiers);
+        vrfRequestToJobId[requestId] = jobId;
+        jobIdToVrfRequest[jobId] = requestId;
+
+        emit ReceiptSubmitted(jobId, outputHash, execSig);
+    }
+
+    /**
+     * @notice Chainlink VRF callback to select verifiers with proven randomness
+     * @param requestId VRF request identifier
+     * @param randomWords Random values from Chainlink VRF
+     */
+    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
+        require(msg.sender == vrfCoordinator, "Only VRF coordinator");
+        require(randomWords.length >= 2, "Need 2 random words");
+
+        bytes32 jobId = vrfRequestToJobId[requestId];
+        require(jobId != bytes32(0), "Invalid VRF request");
+
+        Job storage job = jobs[jobId];
+        require(job.status == Status.Receipt, "Job not in Receipt state");
+
+        jobIdToRandomWords[jobId] = randomWords;
+
+        // Select 3 primary + 3 backup verifiers using VRF randomness
+        job.selectedVerifiers = _selectRandomVerifiersWithVRF(jobId, randomWords[0]);
+        job.backupVerifiers = _selectBackupVerifiersWithVRF(jobId, randomWords[1], job.selectedVerifiers);
+
+        emit VerifiersSelected(jobId, job.selectedVerifiers, job.backupVerifiers);
+    }
+
+    /**
+     * @notice Retry VRF request if callback never arrives (stuck jobs)
+     * @param jobId The job identifier
+     * @dev Callable by anyone after grace period to unstuck jobs
+     */
+    function retryVrf(bytes32 jobId) external nonReentrant {
+        Job storage job = jobs[jobId];
+        require(job.status == Status.Receipt, "Job not in Receipt state");
+        require(job.selectedVerifiers[0] == address(0), "Verifiers already selected");
+
+        uint256 lastRequestTime = receiptTimestamp[jobId];
+        uint256 existingRequestId = jobIdToVrfRequest[jobId];
+
+        // If there's an existing request, check its age; otherwise use receipt timestamp
+        if (existingRequestId != 0 && vrfRequestToJobId[existingRequestId] == jobId) {
+            // Prevent rapid retries - require grace period since last request
+            require(block.timestamp > lastRequestTime + VRF_RETRY_GRACE_PERIOD, "Grace period not elapsed");
+        } else {
+            // First retry after initial VRF request
+            require(block.timestamp > receiptTimestamp[jobId] + VRF_RETRY_GRACE_PERIOD, "Grace period not elapsed");
+        }
+
+        // Request new VRF randomness
+        uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
+            vrfKeyHash,
+            vrfSubId,
+            3, // request confirmations
+            500000, // callback gas limit
+            2 // request 2 random words
+        );
+
+        vrfRequestToJobId[requestId] = jobId;
+        jobIdToVrfRequest[jobId] = requestId;
     }
 
     /**
@@ -375,7 +527,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(block.timestamp <= job.finalizeDeadline, "Finalize deadline passed");
 
         // Calculate fee using tiered structure
-        uint256 protocolFee = _calculateProtocolFee(job.payAmt);
+        uint256 protocolFee = _calculateProtocolFee(job.payAmt, job.payToken);
         uint256 executorPayment = job.payAmt - protocolFee + job.executorDeposit + job.dataStorageFee;
 
         job.status = Status.Finalized;
@@ -410,7 +562,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(block.timestamp > job.finalizeDeadline, "Finalize deadline not passed");
 
         // Use tiered fee structure
-        uint256 protocolFee = _calculateProtocolFee(job.payAmt);
+        uint256 protocolFee = _calculateProtocolFee(job.payAmt, job.payToken);
         uint256 executorPayment = job.payAmt - protocolFee + job.executorDeposit + job.clientDeposit;
 
         job.status = Status.Finalized;
@@ -512,17 +664,27 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         bytes calldata input,
         uint64 fuelLimit,
         uint64 memLimit
-    ) internal pure returns (bytes memory) {
-        // Deterministic reference implementation
-        // Computes SHA256(input) to ensure consistent fraud detection behavior
-        // This maintains fraud proof security properties while Stylus integration
-        // is being developed or in test environments
+    ) internal returns (bytes memory) {
+        require(stylusExecutor != address(0), "Stylus executor not configured");
 
-        // Production deployment pattern:
-        // address stylusExecutor = STYLUS_EXECUTOR_ADDRESS;
-        // return IStylusWasmExecutor(stylusExecutor).execute(wasm, input, fuelLimit, memLimit);
-
-        return abi.encodePacked(sha256(input));
+        // Call Arbitrum Stylus contract to execute Wasm deterministically on-chain
+        // Wrapped in try/catch to prevent grief-reverts from malicious Stylus implementations
+        try IStylusWasmExecutor(stylusExecutor).execute(
+            wasm,
+            input,
+            fuelLimit,
+            memLimit
+        ) returns (bytes memory output) {
+            // Note: Zero-byte outputs are valid (e.g., verification jobs returning success)
+            // Hash of empty bytes: sha256("") = 0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+            return output;
+        } catch Error(string memory reason) {
+            // Revert with executor-provided error message
+            revert(string(abi.encodePacked("Stylus execution failed: ", reason)));
+        } catch (bytes memory /*lowLevelData*/) {
+            // Handle low-level revert (e.g., out of gas, invalid opcode)
+            revert("Stylus execution failed with low-level error");
+        }
     }
 
     /**
@@ -563,7 +725,13 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         address stableToken,
         uint8 region
     ) external nonReentrant {
-        require(stake >= MIN_VERIFIER_STAKE, "Stake below minimum");
+        require(supportedTokens[stableToken], "Token not supported");
+
+        // Normalize MIN_VERIFIER_STAKE (stored in 6 decimals) to token's actual decimals
+        uint8 decimals = tokenDecimals[stableToken];
+        uint256 minStakeNormalized = _normalizeAmount(MIN_VERIFIER_STAKE, 6, decimals);
+
+        require(stake >= minStakeNormalized, "Stake below minimum");
         require(!verifiers[msg.sender].active, "Already registered");
         require(storageGB > 0, "Storage capacity required");
         require(stableToken != address(0), "Invalid token");
@@ -573,7 +741,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         uint256 regionCount = verifierCountByRegion[region];
         uint256 totalVerifiers = verifierList.length;
         if (totalVerifiers > 0) {
-            require((regionCount + 1) * 100 <= totalVerifiers * MAX_REGION_CONCENTRATION,
+            require((regionCount + 1) * 100 <= (totalVerifiers + 1) * MAX_REGION_CONCENTRATION,
                 "Region concentration limit exceeded");
         }
 
@@ -583,6 +751,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         // Register verifier
         verifiers[msg.sender] = VerifierStake({
             stake: stake,
+            stakeToken: stableToken,
             dataCache: dataHashes,
             storageCapacity: storageGB,
             missedChallenges: 0,
@@ -601,16 +770,17 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     /**
      * @notice Unregister as verifier and withdraw stake
      */
-    function unregisterVerifier(address stableToken) external nonReentrant {
+    function unregisterVerifier() external nonReentrant {
         VerifierStake storage verifier = verifiers[msg.sender];
         require(verifier.active, "Not registered");
         require(verifier.missedChallenges < 3, "Too many missed challenges");
 
         uint256 refund = verifier.stake;
+        address token = verifier.stakeToken;
         verifier.active = false;
         verifier.stake = 0;
 
-        IERC20(stableToken).safeTransfer(msg.sender, refund);
+        IERC20(token).safeTransfer(msg.sender, refund);
 
         emit VerifierUnregistered(msg.sender, refund);
     }
@@ -658,6 +828,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     ) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.status == Status.Receipt, "Job not in Receipt state");
+        require(_isSelectedVerifier(jobId, msg.sender), "Not a selected verifier for this job");
         require(challenges[jobId].jobId == bytes32(0), "Challenge already exists");
         require(claimedOutputSize > 0, "Invalid output size");
 
@@ -680,13 +851,11 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     /**
      * @notice Executor responds to bisection round
      * @param jobId The job identifier
-     * @param leftHash Hash of left half of disputed range
-     * @param rightHash Hash of right half of disputed range
+     * @param claimedHash Executor's claimed hash for current dispute range
      */
     function bisectionExecutorRespond(
         bytes32 jobId,
-        bytes32 leftHash,
-        bytes32 rightHash
+        bytes32 claimedHash
     ) external nonReentrant {
         BisectionChallenge storage challenge = challenges[jobId];
         require(challenge.jobId == jobId, "No active challenge");
@@ -694,8 +863,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(block.timestamp <= challenge.deadline, "Round deadline passed");
         require(!challenge.resolved, "Challenge already resolved");
 
-        // Store executor's claims for current bisection
-        challenge.claimedHash = leftHash;
+        // Store executor's claimed hash for current dispute range
+        challenge.claimedHash = claimedHash;
         challenge.deadline = block.timestamp + BISECTION_ROUND_TIMEOUT;
     }
 
@@ -768,15 +937,13 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Resolve bisection when range is <= 32 bytes
+     * @notice Resolve bisection by re-executing full Wasm on-chain via Stylus
      * @param jobId The job identifier
-     * @param disputed32Bytes The final disputed 32-byte chunk
      * @param wasm Full Wasm module
      * @param input Full input data
      */
     function resolveBisection(
         bytes32 jobId,
-        bytes calldata disputed32Bytes,
         bytes calldata wasm,
         bytes calldata input
     ) external nonReentrant {
@@ -789,7 +956,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(sha256(wasm) == job.wasmHash, "Wasm hash mismatch");
         require(sha256(input) == job.inputHash, "Input hash mismatch");
 
-        // FINAL ROUND: Execute only disputed 32 bytes on-chain
+        // Final round: Re-execute full Wasm on-chain via Stylus
         bytes memory canonicalOutput = _executeWasmOnChain(wasm, input, job.fuelLimit, job.memLimit);
         bytes32 canonicalHash = sha256(canonicalOutput);
 
@@ -872,9 +1039,11 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         verifierStake.stake -= penalty;
         verifierStake.missedChallenges++;
 
-        // Reward caller (10% of slashed amount)
+        // Reward caller (10% of slashed amount), remainder to treasury
         uint256 callerReward = penalty / 10;
-        IERC20(job.payToken).safeTransfer(msg.sender, callerReward);
+        uint256 remainder = penalty - callerReward;
+        IERC20(verifierStake.stakeToken).safeTransfer(msg.sender, callerReward);
+        IERC20(verifierStake.stakeToken).safeTransfer(treasury, remainder);
 
         // Deactivate if too many missed challenges
         if (verifierStake.missedChallenges >= 3) {
@@ -884,7 +1053,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         // Activate backup verifier
         _activateBackupVerifier(jobId, verifier);
 
-        emit FraudDetected(jobId, verifier, msg.sender, penalty);
+        emit VerifierSlashed(jobId, verifier, msg.sender, penalty);
     }
 
     /**
@@ -908,7 +1077,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
 
     /**
      * @notice Calculate protocol fee based on tiered structure
-     * @param payAmt Job payment amount in USDC (6 decimals)
+     * @param payAmt Job payment amount in token's native decimals
+     * @param tokenAddr Payment token address (to get decimals)
      * @return Protocol fee in same units as payAmt
      *
      * @dev Tiered fee structure:
@@ -918,9 +1088,9 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
      * $1k-10k:    1.5% fee, $20 minimum
      * $10k+:      1.0% fee, $150 minimum
      */
-    function _calculateProtocolFee(uint256 payAmt) internal pure returns (uint256) {
-        // Note: Assuming 6 decimals (USDC/USDT)
-        uint256 ONE_USD = 1 * 10**6;
+    function _calculateProtocolFee(uint256 payAmt, address tokenAddr) internal view returns (uint256) {
+        uint8 decimals = tokenDecimals[tokenAddr];
+        uint256 ONE_USD = 10**decimals;
 
         if (payAmt <= 10 * ONE_USD) {
             // $0-10: 1.0% fee, $0.10 minimum
@@ -947,6 +1117,23 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
             uint256 fee = (payAmt * 100) / 10000; // 1.0%
             uint256 minFee = 150 * ONE_USD; // $150
             return fee > minFee ? fee : minFee;
+        }
+    }
+
+    /**
+     * @notice Normalize amount from one decimal precision to another
+     * @param amount Amount in source decimals
+     * @param fromDecimals Source decimal places
+     * @param toDecimals Target decimal places
+     * @return Normalized amount in target decimals
+     */
+    function _normalizeAmount(uint256 amount, uint8 fromDecimals, uint8 toDecimals) internal pure returns (uint256) {
+        if (fromDecimals == toDecimals) {
+            return amount;
+        } else if (fromDecimals > toDecimals) {
+            return amount / (10 ** (fromDecimals - toDecimals));
+        } else {
+            return amount * (10 ** (toDecimals - fromDecimals));
         }
     }
 
@@ -1013,7 +1200,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
                 // 1st fraud: 30-day ban
                 rep.banUntil = block.timestamp + EXECUTOR_BAN_DURATION;
                 emit ExecutorBanned(executor, rep.banUntil, false);
-            } else if (rep.fraudAttempts >= 2) {
+            } else if (rep.fraudAttempts > MAX_FRAUD_ATTEMPTS) {
                 // 2nd fraud: Permanent ban
                 rep.permanentlyBanned = true;
                 emit ExecutorBanned(executor, type(uint256).max, true);
@@ -1026,34 +1213,22 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Randomly select 3 primary + 3 backup verifiers with heartbeat filtering
-     * @param jobId Job identifier (used as randomness seed)
-     * @param wasmHash Wasm hash (to find verifiers caching related data)
+     * @notice Select 3 verifiers using Chainlink VRF randomness
+     * @param jobId Job identifier
+     * @param randomWord Random value from Chainlink VRF
      * @return selected Array of 3 verifier addresses
-     *
-     * @dev Production deployment should integrate Chainlink VRF for randomness
-     * Filters verifiers by heartbeat (must have heartbeat within last 10 minutes)
      */
-    function _selectRandomVerifiers(bytes32 jobId, bytes32 wasmHash) internal view returns (address[3] memory selected) {
-        require(verifierList.length >= 6, "Insufficient verifiers (need 6 for primary + backup)");
-
-        // Use block data + jobId for pseudo-randomness (sufficient for MVP)
-        // Production: migrate to Chainlink VRF for manipulation resistance
-        uint256 randomSeed = uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            jobId,
-            blockhash(block.number - 1)
-        )));
-
-        // Select 3 primary verifiers with heartbeat filtering
+    function _selectRandomVerifiersWithVRF(bytes32 jobId, uint256 randomWord) internal view returns (address[3] memory selected) {
         uint256 count = 0;
         uint256 attempts = 0;
-        while (count < 3 && attempts < verifierList.length * 2) {
-            uint256 index = uint256(keccak256(abi.encodePacked(randomSeed, attempts))) % verifierList.length;
+        uint256 maxAttempts = verifierList.length * 2;
+        if (maxAttempts > MAX_VERIFIER_SELECTION_ATTEMPTS) {
+            maxAttempts = MAX_VERIFIER_SELECTION_ATTEMPTS;
+        }
+        while (count < 3 && attempts < maxAttempts) {
+            uint256 index = uint256(keccak256(abi.encodePacked(randomWord, jobId, attempts))) % verifierList.length;
             address verifier = verifierList[index];
 
-            // Check if not already selected
             bool alreadySelected = false;
             for (uint256 i = 0; i < count; i++) {
                 if (selected[i] == verifier) {
@@ -1062,10 +1237,10 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
                 }
             }
 
-            // HEARTBEAT FILTERING: Must have heartbeat within last 10 minutes
             bool isOnline = (block.timestamp - verifiers[verifier].lastHeartbeat) <= HEARTBEAT_INTERVAL;
+            bool tokenMatches = verifiers[verifier].stakeToken == jobs[jobId].payToken;
 
-            if (!alreadySelected && verifiers[verifier].active && isOnline) {
+            if (!alreadySelected && verifiers[verifier].active && isOnline && tokenMatches) {
                 selected[count] = verifier;
                 count++;
             }
@@ -1073,20 +1248,22 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
             attempts++;
         }
 
-        require(count == 3, "Failed to select 3 online verifiers");
+        require(count == 3, "Failed to select 3 token-matching online verifiers");
         return selected;
     }
 
     /**
-     * @notice Select 3 backup verifiers (separate from primary)
+     * @notice Select 3 backup verifiers using VRF randomness
      */
-    function _selectBackupVerifiers(bytes32 jobId, address[3] memory primary) internal view returns (address[3] memory backup) {
-        uint256 randomSeed = uint256(keccak256(abi.encodePacked(jobId, block.timestamp, "backup")));
-
+    function _selectBackupVerifiersWithVRF(bytes32 jobId, uint256 randomWord, address[3] memory primary) internal view returns (address[3] memory backup) {
         uint256 count = 0;
         uint256 attempts = 0;
-        while (count < 3 && attempts < verifierList.length * 2) {
-            uint256 index = uint256(keccak256(abi.encodePacked(randomSeed, attempts))) % verifierList.length;
+        uint256 maxAttempts = verifierList.length * 2;
+        if (maxAttempts > MAX_VERIFIER_SELECTION_ATTEMPTS) {
+            maxAttempts = MAX_VERIFIER_SELECTION_ATTEMPTS;
+        }
+        while (count < 3 && attempts < maxAttempts) {
+            uint256 index = uint256(keccak256(abi.encodePacked(randomWord, jobId, "backup", attempts))) % verifierList.length;
             address verifier = verifierList[index];
 
             // Check not in primary
@@ -1108,8 +1285,9 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
             }
 
             bool isOnline = (block.timestamp - verifiers[verifier].lastHeartbeat) <= HEARTBEAT_INTERVAL;
+            bool tokenMatches = verifiers[verifier].stakeToken == jobs[jobId].payToken;
 
-            if (!isPrimary && !alreadySelected && verifiers[verifier].active && isOnline) {
+            if (!isPrimary && !alreadySelected && verifiers[verifier].active && isOnline && tokenMatches) {
                 backup[count] = verifier;
                 count++;
             }
@@ -1125,14 +1303,13 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     // Admin Functions
     // ============================================================================
 
-    function setClientDepositUsd(uint256 _amount) external onlyOwner {
-        require(_amount > 0 && _amount <= 1000 * 10**6, "Invalid deposit amount");
-        clientDepositUsd = _amount;
-    }
-
-    function setExecutorDepositUsd(uint256 _amount) external onlyOwner {
-        require(_amount > 0 && _amount <= 1000 * 10**6, "Invalid deposit amount");
-        executorDepositUsd = _amount;
+    function setClientDepositParams(uint256 _basisPoints, uint256 _minUsd, uint256 _maxUsd) external onlyOwner {
+        require(_basisPoints > 0 && _basisPoints <= 2000, "Basis points must be 1-2000 (0.01%-20%)");
+        require(_minUsd > 0 && _minUsd <= 100 * 10**6, "Min deposit must be >0 and <=$100");
+        require(_maxUsd >= _minUsd && _maxUsd <= 10000 * 10**6, "Max deposit invalid");
+        clientDepositBasisPoints = _basisPoints;
+        minClientDepositUsd = _minUsd;
+        maxClientDepositUsd = _maxUsd;
     }
 
     function setChallengeWindow(uint256 _seconds) external onlyOwner {
@@ -1143,6 +1320,42 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     function setAcceptWindow(uint256 _seconds) external onlyOwner {
         require(_seconds >= 30 && _seconds <= 3600, "Window must be 30s-1h");
         acceptWindow = _seconds;
+    }
+
+    function setStylusExecutor(address _stylusExecutor) external onlyOwner {
+        require(_stylusExecutor != address(0), "Invalid Stylus executor");
+        stylusExecutor = _stylusExecutor;
+    }
+
+    function setTreasury(address _treasury) external onlyOwner {
+        require(_treasury != address(0), "Invalid treasury");
+        treasury = _treasury;
+    }
+
+    /**
+     * @notice Add a supported payment token
+     * @param token Token address to support
+     * @dev Queries decimals from token contract on addition
+     */
+    function addSupportedToken(address token) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(!supportedTokens[token], "Token already supported");
+        uint8 decimals = IERC20Metadata(token).decimals();
+        tokenDecimals[token] = decimals;
+        supportedTokens[token] = true;
+        emit TokenSupported(token, decimals);
+    }
+
+    /**
+     * @notice Remove a supported payment token
+     * @param token Token address to remove
+     * @dev Preserves tokenDecimals for in-flight jobs using this token
+     */
+    function removeSupportedToken(address token) external onlyOwner {
+        require(supportedTokens[token], "Token not supported");
+        supportedTokens[token] = false;
+        // Keep tokenDecimals[token] intact for existing jobs
+        emit TokenRemoved(token);
     }
 
     // ============================================================================
