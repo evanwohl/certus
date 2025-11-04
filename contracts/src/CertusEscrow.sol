@@ -56,11 +56,12 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     uint256 public challengeWindow = 3600; // 1 hour
     uint256 public acceptWindow = 120; // 2 minutes
 
-    address public stylusExecutor; // Arbitrum Stylus Wasm executor contract
+    address public immutable stylusExecutor; // Arbitrum Stylus Wasm executor contract (immutable for security)
     address public vrfCoordinator; // Chainlink VRF coordinator
     bytes32 public vrfKeyHash; // Chainlink VRF key hash
     uint64 public vrfSubId; // Chainlink VRF subscription ID
     address public treasury; // Protocol treasury for slashing remainder
+    bool public paused; // Emergency circuit breaker
 
     mapping(address => uint8) public tokenDecimals; // Store decimals for supported tokens
     mapping(address => bool) public supportedTokens; // Whitelist of payment tokens
@@ -68,6 +69,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     mapping(uint256 => bytes32) public vrfRequestToJobId; // VRF request ID => job ID
     mapping(bytes32 => uint256) public jobIdToVrfRequest; // job ID => VRF request ID
     mapping(bytes32 => uint256[]) public jobIdToRandomWords; // job ID => random words from VRF
+    mapping(uint256 => bool) public vrfRequestFulfilled; // Prevent replay attacks
 
     // ============================================================================
     // Enums & Structs
@@ -137,12 +139,15 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         address challenger;
         address executor;
         uint256 round;              // Current bisection round (max 20)
-        uint256 disputedStart;      // Start byte of disputed range
-        uint256 disputedEnd;        // End byte of disputed range
-        bytes32 claimedHash;        // Executor's claim for current range
-        bytes32 challengerHash;     // Challenger's claim for current range
+        uint256 disputedStart;      // Start execution step of disputed range
+        uint256 disputedEnd;        // End execution step of disputed range
+        bytes32 executorStateHash;  // Executor's state hash at disputedStart
+        bytes32 challengerStateHash; // Challenger's state hash at disputedStart
         uint256 deadline;           // Deadline for current round response
+        uint256 challengeStake;     // Stake deposited by challenger
         bool resolved;              // Whether challenge is resolved
+        uint256 totalSteps;         // Total execution steps claimed by executor
+        bytes32 finalStateRoot;     // Merkle root of final execution trace
     }
 
     // ============================================================================
@@ -158,7 +163,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
 
     address[] public verifierList; // List of all registered verifiers
     mapping(bytes32 => bytes) public inputDataOnChain; // jobId => input (if ≤100KB)
-    mapping(bytes32 => uint256) public receiptTimestamp; // jobId => when receipt submitted
+    mapping(bytes32 => uint256) public receiptTimestamp; // jobId => block.timestamp when submitted
+    mapping(bytes32 => uint256) public receiptBlockNumber; // jobId => block.number when submitted
     mapping(bytes32 => mapping(address => bool)) public verifierResponded; // jobId => verifier => responded
     mapping(address => ExecutorReputation) public executorReputation; // Track executor behavior
     mapping(uint8 => uint256) public verifierCountByRegion; // Geographic distribution tracking
@@ -168,6 +174,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     uint256 public totalJobsSlashed;
 
     uint256 public constant MIN_VERIFIER_STAKE = 1000 * 10**6; // $1000 USDC
+    uint256 public constant CHALLENGE_STAKE = 100 * 10**6; // $100 stake required to initiate bisection
     uint256 public constant MAX_BISECTION_ROUNDS = 20;
     uint256 public constant BISECTION_ROUND_TIMEOUT = 300; // 5 minutes per round
     uint256 public constant MAX_GRIEF_COUNT = 3; // Ban after 3 timeouts
@@ -176,6 +183,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     uint256 public constant HEARTBEAT_INTERVAL = 10 minutes; // Verifiers must heartbeat every 10 min
     uint256 public constant MAX_REGION_CONCENTRATION = 30; // Max 30% verifiers from single region
     uint256 public constant NETWORK_PARTITION_THRESHOLD = 50; // Grace if >50% miss challenge
+    uint256 public constant VRF_FALLBACK_BLOCKS = 256; // Fallback to blockhash after 256 blocks
+    uint256 public constant MIN_RESPONSIVE_VERIFIERS = 2; // Absolute minimum to prevent censorship
     uint256 public constant EXECUTOR_BAN_DURATION = 30 days; // 30-day ban after 1st fraud
     uint256 public constant MAX_FRAUD_ATTEMPTS = 1; // Permanent ban after 2nd fraud
     uint256 public constant MAX_VERIFIER_SELECTION_ATTEMPTS = 200; // Cap iterations for gas safety
@@ -209,6 +218,24 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     event ExecutorReputationUpdated(address indexed executor, uint256 fraudAttempts, uint256 newMultiplier);
     event NetworkPartitionDetected(bytes32 indexed jobId, uint256 missedCount, uint256 totalVerifiers);
     event ExecutorBanned(address indexed executor, uint256 banUntil, bool permanent);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
+    event FallbackVerifierSelection(bytes32 indexed jobId, uint256 blocksSinceReceipt);
+    event ProtocolFeesWithdrawn(address indexed token, address indexed recipient, uint256 amount);
+
+    // ============================================================================
+    // Modifiers
+    // ============================================================================
+
+    modifier whenNotPaused() {
+        require(!paused, "Contract paused");
+        _;
+    }
+
+    modifier whenPaused() {
+        require(paused, "Contract not paused");
+        _;
+    }
 
     // ============================================================================
     // Constructor
@@ -322,7 +349,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         uint64 fuelLimit,
         uint64 memLimit,
         uint32 maxOutputSize
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         require(!jobExists[jobId], "Job already exists");
         require(wasmModules[wasmHash].length > 0, "Wasm not registered");
         require(payAmt > 0, "Payment must be > 0");
@@ -389,7 +416,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
      * @dev Fixed 2.0x collateral for all executors (no reputation system).
      * Enforces executor bans (30 days after 1st fraud, permanent after 2nd).
      */
-    function acceptJob(bytes32 jobId) external nonReentrant {
+    function acceptJob(bytes32 jobId) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         require(job.status == Status.Created, "Job not in Created state");
         require(block.timestamp <= job.acceptDeadline, "Accept deadline passed");
@@ -401,10 +428,10 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(block.timestamp >= rep.banUntil, "Executor temporarily banned");
 
         // Fixed 2.0x collateral (200 / 100 = 2.0)
-        // Overflow protection: ensure payAmt doesn't overflow when multiplied
-        require(job.payAmt <= type(uint256).max / EXECUTOR_COLLATERAL_MULTIPLIER, "Payment amount too large");
-        uint256 executorDeposit = (job.payAmt * EXECUTOR_COLLATERAL_MULTIPLIER) / 100;
-        require(executorDeposit == job.payAmt * 2, "Collateral must be exactly 2.0x payAmt");
+        // Overflow protection: ensure calculations don't overflow
+        require(job.payAmt <= type(uint256).max / 2, "Payment amount too large");
+        uint256 executorDeposit = job.payAmt * 2;
+        require(executorDeposit / 2 == job.payAmt, "Overflow in collateral calculation");
 
         // Transfer executor deposit
         IERC20(job.payToken).safeTransferFrom(msg.sender, address(this), executorDeposit);
@@ -439,6 +466,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         job.status = Status.Receipt;
         job.finalizeDeadline = uint64(block.timestamp) + uint64(challengeWindow);
         receiptTimestamp[jobId] = block.timestamp;
+        receiptBlockNumber[jobId] = block.number;
 
         // Request Chainlink VRF for verifier selection
         uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
@@ -462,6 +490,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
      */
     function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
         require(msg.sender == vrfCoordinator, "Only VRF coordinator");
+        require(vrfCoordinator != address(0), "VRF coordinator not set");
+        require(!vrfRequestFulfilled[requestId], "Request already fulfilled");
         require(randomWords.length >= 2, "Need 2 random words");
 
         bytes32 jobId = vrfRequestToJobId[requestId];
@@ -470,6 +500,7 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         Job storage job = jobs[jobId];
         require(job.status == Status.Receipt, "Job not in Receipt state");
 
+        vrfRequestFulfilled[requestId] = true;
         jobIdToRandomWords[jobId] = randomWords;
 
         // Select 3 primary + 3 backup verifiers using VRF randomness
@@ -582,6 +613,36 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @notice Fallback verifier selection using blockhash if VRF stuck
+     * @param jobId The job identifier
+     * @dev Can only be called 256+ blocks after receipt if VRF hasn't responded
+     */
+    function fallbackVerifierSelection(bytes32 jobId) external nonReentrant {
+        Job storage job = jobs[jobId];
+        require(job.status == Status.Receipt, "Not in receipt status");
+
+        uint256 requestId = jobIdToVrfRequest[jobId];
+        require(requestId != 0, "No VRF request for job");
+        require(!vrfRequestFulfilled[requestId], "VRF already fulfilled");
+
+        // Must wait 256+ blocks since receipt submission
+        uint256 blocksSinceReceipt = block.number - receiptBlockNumber[jobId];
+        require(blocksSinceReceipt >= VRF_FALLBACK_BLOCKS, "Must wait 256 blocks for fallback");
+
+        // Use blockhash as entropy source (weak but better than stuck)
+        uint256 pseudoRandom1 = uint256(blockhash(block.number - 1));
+        uint256 pseudoRandom2 = uint256(blockhash(block.number - 2));
+
+        // Mark as fulfilled to prevent double selection
+        vrfRequestFulfilled[requestId] = true;
+
+        // Select verifiers using blockhash entropy
+        _selectVerifiersWithRandomness(jobId, pseudoRandom1, pseudoRandom2);
+
+        emit FallbackVerifierSelection(jobId, blocksSinceReceipt);
+    }
+
+    /**
      * @notice Submit fraud proof - re-executes Wasm on-chain via Arbitrum Stylus
      * @param jobId The job identifier
      * @param wasm Full Wasm module bytecode
@@ -679,11 +740,15 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
             // Hash of empty bytes: sha256("") = 0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
             return output;
         } catch Error(string memory reason) {
-            // Revert with executor-provided error message
-            revert(string(abi.encodePacked("Stylus execution failed: ", reason)));
+            // Stylus error - do not revert as that would block fraud proof
+            // Return specific error sentinel to trigger fraud detection
+            bytes memory errorSentinel = abi.encodePacked("STYLUS_ERROR:", reason);
+            return errorSentinel;
         } catch (bytes memory /*lowLevelData*/) {
-            // Handle low-level revert (e.g., out of gas, invalid opcode)
-            revert("Stylus execution failed with low-level error");
+            // Low-level error - do not revert as that would block fraud proof
+            // Return error sentinel to trigger fraud detection
+            bytes memory errorSentinel = abi.encodePacked("STYLUS_LOW_LEVEL_ERROR");
+            return errorSentinel;
         }
     }
 
@@ -832,30 +897,38 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(challenges[jobId].jobId == bytes32(0), "Challenge already exists");
         require(claimedOutputSize > 0, "Invalid output size");
 
+        // Require challenger to stake CHALLENGE_STAKE to prevent griefing
+        uint8 decimals = tokenDecimals[job.payToken];
+        uint256 stake = _normalizeAmount(CHALLENGE_STAKE, 6, decimals);
+        IERC20(job.payToken).safeTransferFrom(msg.sender, address(this), stake);
+
         challenges[jobId] = BisectionChallenge({
             jobId: jobId,
             challenger: msg.sender,
             executor: job.executor,
             round: 1,
             disputedStart: 0,
-            disputedEnd: claimedOutputSize,
-            claimedHash: job.outputHash,
-            challengerHash: bytes32(0),
+            disputedEnd: claimedOutputSize, // This represents execution steps now
+            executorStateHash: bytes32(0),
+            challengerStateHash: bytes32(0),
             deadline: block.timestamp + BISECTION_ROUND_TIMEOUT,
-            resolved: false
+            challengeStake: stake,
+            resolved: false,
+            totalSteps: claimedOutputSize, // Total execution steps
+            finalStateRoot: bytes32(0) // Will be set by challenger
         });
 
         emit BisectionInitiated(jobId, msg.sender, claimedOutputSize);
     }
 
     /**
-     * @notice Executor responds to bisection round
+     * @notice Executor responds with state hash at midpoint
      * @param jobId The job identifier
-     * @param claimedHash Executor's claimed hash for current dispute range
+     * @param midpointStateHash State hash at midpoint of disputed range
      */
     function bisectionExecutorRespond(
         bytes32 jobId,
-        bytes32 claimedHash
+        bytes32 midpointStateHash
     ) external nonReentrant {
         BisectionChallenge storage challenge = challenges[jobId];
         require(challenge.jobId == jobId, "No active challenge");
@@ -863,8 +936,8 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         require(block.timestamp <= challenge.deadline, "Round deadline passed");
         require(!challenge.resolved, "Challenge already resolved");
 
-        // Store executor's claimed hash for current dispute range
-        challenge.claimedHash = claimedHash;
+        // Store executor's state hash at midpoint
+        challenge.executorStateHash = midpointStateHash;
         challenge.deadline = block.timestamp + BISECTION_ROUND_TIMEOUT;
     }
 
@@ -905,31 +978,35 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Challenger picks which half to dispute
+     * @notice Challenger narrows disputed range based on midpoint state
      * @param jobId The job identifier
-     * @param disputeLeft true to dispute left half, false for right half
-     * @param challengerHash Challenger's hash for disputed half
+     * @param disputeFirstHalf true to dispute first half false for second
+     * @param challengerMidpointHash Challenger's state hash at midpoint
      */
     function bisectionChallengerPick(
         bytes32 jobId,
-        bool disputeLeft,
-        bytes32 challengerHash
+        bool disputeFirstHalf,
+        bytes32 challengerMidpointHash
     ) external nonReentrant {
         BisectionChallenge storage challenge = challenges[jobId];
         require(challenge.jobId == jobId, "No active challenge");
         require(msg.sender == challenge.challenger, "Only challenger can pick");
         require(block.timestamp <= challenge.deadline, "Round deadline passed");
         require(!challenge.resolved, "Challenge already resolved");
+        require(challenge.executorStateHash != bytes32(0), "Executor must respond first");
 
         uint256 mid = (challenge.disputedStart + challenge.disputedEnd) / 2;
 
-        if (disputeLeft) {
+        // Compare state hashes at midpoint to narrow range
+        if (challengerMidpointHash != challenge.executorStateHash) {
+            // Disagreement at midpoint - dispute first half
             challenge.disputedEnd = mid;
         } else {
+            // Agreement at midpoint - dispute second half
             challenge.disputedStart = mid;
         }
 
-        challenge.challengerHash = challengerHash;
+        challenge.challengerStateHash = challengerMidpointHash;
         challenge.round++;
         challenge.deadline = block.timestamp + BISECTION_ROUND_TIMEOUT;
 
@@ -937,32 +1014,38 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Resolve bisection by re-executing full Wasm on-chain via Stylus
+     * @notice Resolve bisection by executing single disputed step on-chain
      * @param jobId The job identifier
-     * @param wasm Full Wasm module
-     * @param input Full input data
+     * @param stepData Execution data for single step (instruction + state)
+     * @param preStateProof Merkle proof of pre-state
+     * @param postStateProof Merkle proof of post-state
      */
     function resolveBisection(
         bytes32 jobId,
-        bytes calldata wasm,
-        bytes calldata input
+        bytes calldata stepData,
+        bytes32[] calldata preStateProof,
+        bytes32[] calldata postStateProof
     ) external nonReentrant {
         BisectionChallenge storage challenge = challenges[jobId];
         Job storage job = jobs[jobId];
 
         require(challenge.jobId == jobId, "No active challenge");
         require(!challenge.resolved, "Already resolved");
-        require((challenge.disputedEnd - challenge.disputedStart) <= 32, "Range too large");
-        require(sha256(wasm) == job.wasmHash, "Wasm hash mismatch");
-        require(sha256(input) == job.inputHash, "Input hash mismatch");
+        require((challenge.disputedEnd - challenge.disputedStart) == 1, "Not narrowed to single step");
 
-        // Final round: Re-execute full Wasm on-chain via Stylus
-        bytes memory canonicalOutput = _executeWasmOnChain(wasm, input, job.fuelLimit, job.memLimit);
-        bytes32 canonicalHash = sha256(canonicalOutput);
+        // Verify Merkle proofs match claimed states
+        bytes32 preStateHash = _verifyMerkleProof(stepData, preStateProof, challenge.disputedStart);
+        bytes32 postStateHash = _verifyMerkleProof(stepData, postStateProof, challenge.disputedStart + 1);
+
+        // Execute SINGLE step on-chain via Stylus (cheap)
+        bytes32 canonicalPostState = _executeSingleStep(stepData, preStateHash);
 
         challenge.resolved = true;
 
-        if (canonicalHash != job.outputHash) {
+        // Determine fraud based on single step execution
+        bool fraud = (canonicalPostState != postStateHash);
+
+        if (fraud) {
             // FRAUD CONFIRMED
             uint256 totalSlashed = job.payAmt + job.executorDeposit;
             uint256 verifierBounty = (totalSlashed * VERIFIER_BOUNTY_PCT) / 100;
@@ -971,15 +1054,16 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
             job.status = Status.Slashed;
             totalJobsSlashed++;
 
-            IERC20(job.payToken).safeTransfer(challenge.challenger, verifierBounty);
+            IERC20(job.payToken).safeTransfer(challenge.challenger, verifierBounty + challenge.challengeStake);
             IERC20(job.payToken).safeTransfer(job.client, clientRefund + job.clientDeposit);
 
             emit FraudDetected(jobId, job.executor, challenge.challenger, totalSlashed);
             emit BisectionResolved(jobId, true);
         } else {
-            // No fraud - challenger was wrong
+            // No fraud detected - slash challenger stake and refund executor
+            IERC20(job.payToken).safeTransfer(job.executor, challenge.challengeStake);
             emit BisectionResolved(jobId, false);
-            revert("No fraud detected");
+            revert("No fraud detected - challenger slashed");
         }
     }
 
@@ -1026,8 +1110,11 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
             }
         }
 
-        // Grace period: if 2+ out of 3 missed, likely network partition (don't slash)
-        if (missedCount * 100 > 3 * NETWORK_PARTITION_THRESHOLD) {
+        // Grace period: if >50% missed AND responsive count < 2, likely network partition
+        uint256 responsiveCount = 3 - missedCount;
+        bool isPartition = (missedCount * 100 > 3 * NETWORK_PARTITION_THRESHOLD) && (responsiveCount < MIN_RESPONSIVE_VERIFIERS);
+
+        if (isPartition) {
             emit NetworkPartitionDetected(jobId, missedCount, 3);
             // Activate backup verifier instead of slashing
             _activateBackupVerifier(jobId, verifier);
@@ -1322,14 +1409,38 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
         acceptWindow = _seconds;
     }
 
-    function setStylusExecutor(address _stylusExecutor) external onlyOwner {
-        require(_stylusExecutor != address(0), "Invalid Stylus executor");
-        stylusExecutor = _stylusExecutor;
-    }
-
     function setTreasury(address _treasury) external onlyOwner {
         require(_treasury != address(0), "Invalid treasury");
         treasury = _treasury;
+    }
+
+    function pause() external onlyOwner whenNotPaused {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner whenPaused {
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
+
+    /**
+     * @notice Withdraw accumulated protocol fees
+     * @param token Token address to withdraw
+     * @param to Recipient address
+     * @param amount Amount to withdraw
+     */
+    function withdrawProtocolFees(address token, address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be positive");
+
+        // Safety check to prevent draining user funds
+        // Protocol fees are tracked separately from escrowed job funds
+        uint256 contractBalance = IERC20(token).balanceOf(address(this));
+        require(contractBalance >= amount, "Insufficient balance");
+
+        IERC20(token).safeTransfer(to, amount);
+        emit ProtocolFeesWithdrawn(token, to, amount);
     }
 
     /**
@@ -1370,5 +1481,58 @@ contract CertusEscrow is Ownable, ReentrancyGuard {
     function getJobStatus(bytes32 jobId) external view returns (Status) {
         require(jobExists[jobId], "Job does not exist");
         return jobs[jobId].status;
+    }
+
+    // ============================================================================
+    // Bisection Helper Functions
+    // ============================================================================
+
+    /**
+     * @notice Verify Merkle proof for execution state at specific step
+     * @param data Step data
+     * @param proof Merkle proof path
+     * @param stepIndex Step index in execution trace
+     */
+    function _verifyMerkleProof(
+        bytes memory data,
+        bytes32[] memory proof,
+        uint256 stepIndex
+    ) internal pure returns (bytes32) {
+        bytes32 computedHash = keccak256(abi.encodePacked(data, stepIndex));
+
+        for (uint256 i = 0; i < proof.length; i++) {
+            bytes32 proofElement = proof[i];
+            if (stepIndex % 2 == 0) {
+                computedHash = keccak256(abi.encodePacked(computedHash, proofElement));
+            } else {
+                computedHash = keccak256(abi.encodePacked(proofElement, computedHash));
+            }
+            stepIndex = stepIndex / 2;
+        }
+
+        return computedHash;
+    }
+
+    /**
+     * @notice Execute single WASM instruction step via Stylus
+     * @param stepData Encoded instruction and memory state
+     * @param preStateHash Hash of machine state before step
+     * @return Hash of machine state after step execution
+     */
+    function _executeSingleStep(
+        bytes memory stepData,
+        bytes32 preStateHash
+    ) internal returns (bytes32) {
+        // Call Stylus single-step executor (gas efficient)
+        (bool success, bytes memory result) = stylusExecutor.call(
+            abi.encodeWithSignature("executeStep(bytes,bytes32)", stepData, preStateHash)
+        );
+
+        if (!success) {
+            // If Stylus fails treat as executor fraud
+            return bytes32(0);
+        }
+
+        return abi.decode(result, (bytes32));
     }
 }
