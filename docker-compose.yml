@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  executor:
+    build:
+      context: .
+      dockerfile: executor/Dockerfile
+    environment:
+      - PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
+      - ESCROW_ADDRESS=${ESCROW_ADDRESS}
+      - RPC_URL=${RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
+      - REGION=${REGION:-NA}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./executor/config.yml:/app/config.yml
+    restart: unless-stopped
+    networks:
+      - certus
+
+  verifier:
+    build:
+      context: .
+      dockerfile: verifier/Dockerfile
+    environment:
+      - PRIVATE_KEY=${VERIFIER_PRIVATE_KEY}
+      - ESCROW_ADDRESS=${ESCROW_ADDRESS}
+      - RPC_URL=${RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
+      - REGION=${REGION:-NA}
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./verifier/config.yml:/app/config.yml
+    restart: unless-stopped
+    networks:
+      - certus
+
+  # Optional: Local Arbitrum node for testing
+  # arbitrum-node:
+  #   image: offchainlabs/nitro-node:latest
+  #   ports:
+  #     - "8547:8547"
+  #   networks:
+  #     - certus
+
+networks:
+  certus:
+    driver: bridge

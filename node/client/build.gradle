@@ -1,0 +1,9 @@
+dependencies {
+    implementation project(':proto')
+
+    // Web3j for Ethereum interaction
+    implementation 'org.web3j:core:4.10.3'
+
+    // Ethereum ABI encoding
+    implementation 'org.web3j:abi:4.10.3'
+}

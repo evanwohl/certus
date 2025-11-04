@@ -1,0 +1,7 @@
+dependencies {
+    implementation project(':proto')
+    implementation project(':client')
+
+    // Web3j
+    implementation 'org.web3j:core:4.10.3'
+}

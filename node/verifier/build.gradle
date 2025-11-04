@@ -1,0 +1,8 @@
+dependencies {
+    implementation project(':proto')
+    implementation project(':client')
+    implementation project(':executor')  // For WasmSandbox
+
+    // Web3j
+    implementation 'org.web3j:core:4.10.3'
+}

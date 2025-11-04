@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package net.certus.proto;
+
+option java_multiple_files = true;
+option java_package = "net.certus.proto";
+option java_outer_classname = "CertusProto";
+
+// JobSpec represents a computation job
+message JobSpec {
+    bytes job_id = 1;
+    bytes wasm_hash = 2;
+    bytes input_hash = 3;
+    string pay_token = 4;
+    string pay_amt = 5;  // uint256 as string
+    string client = 6;
+    string client_deposit = 7;  // uint256 as string
+    uint64 accept_deadline = 8;
+    uint64 finalize_deadline = 9;
+    uint64 fuel_limit = 10;
+    uint64 mem_limit = 11;
+    uint32 max_output_size = 12;
+    uint32 collateral_ratio_bps = 13;  // Collateral ratio in basis points (10000 = 1.0x, 15000 = 1.5x, 30000 = 3.0x)
+}
+
+// ExecReceipt represents the executor's computation result
+message ExecReceipt {
+    bytes job_id = 1;
+    bytes wasm_hash = 2;
+    bytes input_hash = 3;
+    bytes output_hash = 4;
+    string executor = 5;
+    string executor_deposit = 6;  // uint256 as string
+    bytes executor_sig = 7;
+}
+
+// Ack is a generic acknowledgment
+message Ack {
+    bool success = 1;
+    string message = 2;
+}
+
+// Request messages
+message GetJobReq {
+    bytes job_id = 1;
+}
+
+message AcceptReq {
+    bytes job_id = 1;
+    string executor = 2;
+}
+
+message ReceiptReq {
+    ExecReceipt receipt = 1;
+}
+
+message VerifyReq {
+    bytes job_id = 1;
+}
+
+message VerifyRes {
+    bool valid = 1;
+    bytes output_hash = 2;
+    string message = 3;
+}
+
+message ClaimReq {
+    bytes job_id = 1;
+}
+
+// Certus gRPC service
+service Certus {
+    rpc SubmitJob(JobSpec) returns (Ack);
+    rpc GetJob(GetJobReq) returns (JobSpec);
+    rpc AcceptJob(AcceptReq) returns (Ack);
+    rpc SubmitReceipt(ReceiptReq) returns (Ack);
+    rpc VerifyJob(VerifyReq) returns (VerifyRes);
+    rpc ClaimTimeout(ClaimReq) returns (Ack);
+}

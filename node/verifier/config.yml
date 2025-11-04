@@ -1,0 +1,31 @@
+# Certus Verifier Configuration
+
+# Network configuration
+network:
+  rpcUrl: https://sepolia-rollup.arbitrum.io/rpc
+  chainId: 421614  # Arbitrum Sepolia
+  contractAddress: 0x...  # Deployed CertusEscrow address
+
+# Verifier account
+verifier:
+  privateKey: 0x...  # Ethereum private key (DO NOT commit!)
+
+# Verification settings
+verification:
+  pollIntervalMs: 5000
+  fraudDetectionDelayMs: 1000  # Wait before submitting fraud proof
+  maxGasPrice: 50000000000  # 50 gwei max for fraud proofs
+
+# Wasm runtime (must match executor configuration for determinism!)
+wasm:
+  runtime: mock  # "mock" for testing, "wasmtime" for production
+  # wasmtimeLibPath: /path/to/libwasmtime.so
+
+# Fraud proof bounty tracking
+bounty:
+  minBountyAmount: 1000000  # 1 USDC minimum to submit proof
+
+# Logging
+logging:
+  level: INFO
+  file: ./logs/verifier.log

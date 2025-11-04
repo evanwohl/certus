@@ -1,0 +1,34 @@
+# Certus Executor Configuration
+
+# Network configuration
+network:
+  rpcUrl: https://sepolia-rollup.arbitrum.io/rpc
+  chainId: 421614  # Arbitrum Sepolia
+  contractAddress: 0x...  # Deployed CertusEscrow address
+
+# Executor account
+executor:
+  privateKey: 0x...  # Ethereum private key (DO NOT commit!)
+  signingKeySeed: 0x...  # Ed25519 signing key (32 bytes hex)
+  deposit: 5000000  # 5 USDC (6 decimals)
+
+# Execution limits (can be overridden per job)
+execution:
+  defaultFuelLimit: 10000000
+  defaultMemLimit: 67108864  # 64 MB
+  defaultMaxOutputSize: 1048576  # 1 MB
+
+# Wasm runtime
+wasm:
+  runtime: mock  # "mock" for testing, "wasmtime" for production
+  # wasmtimeLibPath: /path/to/libwasmtime.so  # Required for wasmtime runtime
+
+# Job monitoring
+monitoring:
+  pollIntervalMs: 5000
+  acceptWindowBuffer: 10  # seconds before deadline to stop accepting
+
+# Logging
+logging:
+  level: INFO
+  file: ./logs/executor.log

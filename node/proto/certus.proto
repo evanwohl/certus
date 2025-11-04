@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+package certus;
+
+option java_multiple_files = true;
+option java_package = "net.certus.proto";
+option java_outer_classname = "CertusProto";
+
+// ============================================================================
+// Data Models
+// ============================================================================
+
+message JobSpec {
+  bytes job_id = 1;           // 32 bytes - SHA256(wasmHash || inputHash || clientPubKey || nonce)
+  bytes wasm_hash = 2;        // 32 bytes - SHA256(wasmBytes)
+  bytes input_hash = 3;       // 32 bytes - SHA256(inputBytes)
+  string pay_token = 4;       // ERC20 address (USDC/USDT/DAI)
+  string pay_amt = 5;         // uint256 as string (token smallest units)
+  string client = 6;          // client ETH address
+  string client_deposit = 7;  // uint256 as string
+  uint64 accept_deadline = 8; // epoch seconds
+  uint64 finalize_deadline = 9;
+  uint64 fuel_limit = 10;     // Wasm instruction budget
+  uint64 mem_limit = 11;      // bytes
+  uint32 max_output_size = 12; // bytes
+  uint32 collateral_ratio_bps = 13; // 100-300 (1.0x-3.0x)
+  uint32 certus_fee_payment_pct = 14; // 0, 50, or 100
+  bool is_priority = 15;      // Burned CERTUS for priority matching
+  string wasm_url = 16;       // Optional: off-chain wasm URL
+  string input_url = 17;      // Optional: off-chain input URL
+}
+
+message ExecReceipt {
+  bytes job_id = 1;
+  bytes wasm_hash = 2;
+  bytes input_hash = 3;
+  bytes output_hash = 4;      // SHA256(outputBytes)
+  string executor = 5;        // executor ETH address
+  string executor_deposit = 6; // uint256 as string
+  bytes executor_sig = 7;     // Ed25519 signature (64 bytes)
+}
+
+message FraudProof {
+  bytes job_id = 1;
+  bytes wasm_bytes = 2;       // full wasm module
+  bytes input_bytes = 3;
+  bytes claimed_output_hash = 4;
+  bytes recomputed_output_hash = 5; // result from on-chain Stylus run
+}
+
+message VerifierRegistration {
+  string verifier_address = 1;
+  string usdc_stake = 2;      // uint256 as string (minimum $100)
+  string certus_stake = 3;    // uint256 as string (optional for boost)
+  repeated bytes data_hashes = 4; // List of data hashes to cache
+  uint64 storage_gb = 5;      // Storage capacity in GB
+  string stake_token = 6;     // ERC20 token address for USDC
+  uint64 jobs_processed = 7;  // Jobs processed this month
+  bool active = 8;
+}
+
+message BisectionChallenge {
+  bytes job_id = 1;
+  string challenger = 2;
+  string executor = 3;
+  uint64 round = 4;
+  uint64 disputed_start = 5;
+  uint64 disputed_end = 6;
+  bytes claimed_hash = 7;
+  bytes challenger_hash = 8;
+  uint64 deadline = 9;
+  bool resolved = 10;
+}
+
+// ============================================================================
+// RPC Messages
+// ============================================================================
+
+message Ack {
+  bool success = 1;
+  string message = 2;
+  bytes job_id = 3;
+}
+
+message GetJobReq {
+  bytes job_id = 1;
+}
+
+message AcceptReq {
+  bytes job_id = 1;
+  string executor = 2;
+  string deposit_amt = 3;
+}
+
+message ReceiptReq {
+  ExecReceipt receipt = 1;
+}
+
+message VerifyReq {
+  bytes job_id = 1;
+  bytes wasm_bytes = 2;
+  bytes input_bytes = 3;
+}
+
+message VerifyRes {
+  bool is_valid = 1;
+  bytes computed_output_hash = 2;
+  string message = 3;
+}
+
+message ClaimReq {
+  bytes job_id = 1;
+  string executor = 2;
+}
+
+message WasmRegisterReq {
+  bytes wasm_bytes = 1;
+  bytes test_input = 2;          // Test vector input
+  bytes expected_output_hash = 3; // Expected SHA256 hash of test output
+}
+
+message WasmRegisterRes {
+  bytes wasm_hash = 1;
+  bytes test_vector_hash = 2; // Hash of validated test output
+}
+
+message WasmGetReq {
+  bytes wasm_hash = 1;
+}
+
+message WasmGetRes {
+  bytes wasm_bytes = 1;
+}
+
+message VerifierRegisterReq {
+  string stake_amount = 1;
+  repeated bytes data_hashes = 2;
+  uint64 storage_gb = 3;
+  string stake_token = 4;
+}
+
+message BisectionInitiateReq {
+  bytes job_id = 1;
+  uint64 claimed_output_size = 2;
+}
+
+message BisectionRespondReq {
+  bytes job_id = 1;
+  bytes left_hash = 2;
+  bytes right_hash = 3;
+}
+
+message BisectionPickReq {
+  bytes job_id = 1;
+  bool dispute_left = 2;
+  bytes challenger_hash = 3;
+}
+
+message BisectionResolveReq {
+  bytes job_id = 1;
+  bytes disputed_32_bytes = 2;
+  bytes wasm_bytes = 3;
+  bytes input_bytes = 4;
+}
+
+// ============================================================================
+// gRPC Service Definition
+// ============================================================================
+
+service Certus {
+  // Client operations
+  rpc SubmitJob(JobSpec) returns (Ack);
+  rpc GetJob(GetJobReq) returns (JobSpec);
+  rpc FinalizeJob(GetJobReq) returns (Ack);
+
+  // Executor operations
+  rpc AcceptJob(AcceptReq) returns (Ack);
+  rpc SubmitReceipt(ReceiptReq) returns (Ack);
+  rpc ClaimTimeout(ClaimReq) returns (Ack);
+
+  // Verifier operations
+  rpc RegisterVerifier(VerifierRegisterReq) returns (Ack);
+  rpc UnregisterVerifier(GetJobReq) returns (Ack);
+  rpc VerifyJob(VerifyReq) returns (VerifyRes);
+
+  // Bisection protocol operations
+  rpc InitiateBisection(BisectionInitiateReq) returns (Ack);
+  rpc BisectionRespond(BisectionRespondReq) returns (Ack);
+  rpc BisectionPick(BisectionPickReq) returns (Ack);
+  rpc ResolveBisection(BisectionResolveReq) returns (Ack);
+
+  // Wasm storage operations
+  rpc RegisterWasm(WasmRegisterReq) returns (WasmRegisterRes);
+  rpc GetWasm(WasmGetReq) returns (WasmGetRes);
+}
+
+// ============================================================================
+// Directory Service (MVP - centralized matchmaking)
+// ============================================================================
+
+message ExecutorAdvertisement {
+  string executor_address = 1;
+  string endpoint = 2;             // gRPC endpoint (host:port)
+  uint64 max_collateral_usdc = 3;  // Max job value executor can handle
+  uint32 min_collateral_ratio_bps = 4; // Minimum collateral ratio accepted
+  uint32 max_collateral_ratio_bps = 5; // Maximum collateral ratio accepted
+  repeated string supported_tokens = 6; // Supported payment tokens
+  uint64 certus_stake = 7;         // CERTUS staked (for capital efficiency)
+  uint64 heartbeat_timestamp = 8;  // Last heartbeat
+  bool accepting_jobs = 9;
+}
+
+message VerifierAdvertisement {
+  string verifier_address = 1;
+  string endpoint = 2;
+  uint64 usdc_stake = 3;
+  uint64 certus_stake = 4;
+  uint64 storage_capacity_gb = 5;
+  repeated bytes cached_data_hashes = 6;
+  uint64 jobs_processed = 7;
+  uint64 heartbeat_timestamp = 8;
+  bool active = 9;
+}
+
+message RegisterExecutorReq {
+  ExecutorAdvertisement executor_ad = 1;
+  bytes signature = 2;             // Ed25519 signature of executor_ad
+}
+
+message DiscoverExecutorsReq {
+  uint64 min_collateral = 1;
+  uint32 collateral_ratio_bps = 2;
+  string pay_token = 3;
+  uint32 limit = 4;
+}
+
+message DiscoverExecutorsRes {
+  repeated ExecutorAdvertisement executors = 1;
+}
+
+message DiscoverVerifiersReq {
+  bytes wasm_hash = 1;             // Find verifiers caching this data
+  uint32 limit = 2;
+}
+
+message DiscoverVerifiersRes {
+  repeated VerifierAdvertisement verifiers = 1;
+}
+
+service Directory {
+  rpc RegisterExecutor(RegisterExecutorReq) returns (Ack);
+  rpc DiscoverExecutors(DiscoverExecutorsReq) returns (DiscoverExecutorsRes);
+  rpc DiscoverVerifiers(DiscoverVerifiersReq) returns (DiscoverVerifiersRes);
+  rpc Heartbeat(Ack) returns (Ack);
+}

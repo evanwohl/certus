@@ -1,0 +1,6 @@
+rootProject.name = 'certus'
+
+include 'executor'
+include 'verifier'
+include 'client'
+include 'proto'

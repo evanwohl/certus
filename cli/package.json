@@ -1,0 +1,29 @@
+{
+  "name": "@certus/cli",
+  "version": "1.0.0-mvp",
+  "description": "Certus CLI for deterministic verifiable compute",
+  "main": "dist/index.js",
+  "bin": {
+    "certus": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "certus": "ts-node src/index.ts"
+  },
+  "keywords": ["certus", "wasm", "verification", "arbitrum", "stylus"],
+  "author": "Certus Network",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^11.1.0",
+    "ethers": "^6.9.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "ts-node": "^10.9.2"
+  }
+}
