@@ -112,15 +112,12 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         require(!challenge.resolved, "Challenge already resolved");
         require(challenge.executorStateHash != bytes32(0), "Executor must respond first");
         require(challenge.round < MAX_BISECTION_ROUNDS, "Max rounds exceeded");
-        // Anti-grief: require exponential stake for each round (capped)
-        if (challenge.round > 5) {
-            uint256 multiplier = 2 ** (challenge.round - 5); // starts at 2^1 for round 6
-            if (multiplier > MAX_STAKE_MULTIPLIER) {
-                multiplier = MAX_STAKE_MULTIPLIER;
-            }
-            uint256 requiredStake = challenge.challengeStake * multiplier;
-            IERC20(payToken).safeTransferFrom(msg.sender, address(this), requiredStake);
-            challengerBonds[jobId] += requiredStake;
+
+        // Progressive stake requirements prevent DoS
+        uint256 stakeRequired = _calculateRoundStake(challenge.round, challenge.challengeStake);
+        if (stakeRequired > 0) {
+            IERC20(payToken).safeTransferFrom(msg.sender, address(this), stakeRequired);
+            challengerBonds[jobId] += stakeRequired;
         }
 
         uint256 mid = (challenge.disputedStart + challenge.disputedEnd) / 2;
@@ -236,7 +233,20 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
     }
 
     /**
-     * @notice Execute single WASM instruction step via Stylus
+     * Calculate progressive stake for bisection rounds
+     */
+    function _calculateRoundStake(uint256 round, uint256 baseStake) internal pure returns (uint256) {
+        if (round <= 5) return 0; // Free rounds 1-5
+
+        // Linear growth after round 5, not exponential
+        uint256 multiplier = round - 4; // 1x at round 6, 2x at round 7, etc
+        if (multiplier > 10) multiplier = 10; // Cap at 10x
+
+        return baseStake * multiplier / 10; // Divide by 10 for reasonable amounts
+    }
+
+    /**
+     * Execute single WASM instruction step
      */
     function _executeSingleStep(
         bytes memory stepData,
@@ -247,7 +257,7 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         );
 
         if (!success) {
-            return bytes32(0); // Treat Stylus failure as fraud
+            return bytes32(0);
         }
 
         return abi.decode(result, (bytes32));

@@ -269,16 +269,7 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
     }
 
     /**
-     * Execute WASM on-chain via Stylus executor
-     *
-     * @dev CRITICAL TRUST ASSUMPTION: The stylusExecutor contract must be:
-     * 1. Immutable - deployed with CREATE2 for deterministic address
-     * 2. Audited - thoroughly reviewed for correctness
-     * 3. Non-upgradeable - or governed by timelock if upgradeable
-     *
-     * A malicious or buggy Stylus executor could selectively fail to hide fraud.
-     * This trust boundary cannot be eliminated at the contract level.
-     * Deploy with extreme caution and consider formal verification.
+     * Execute WASM through Arbitrum Stylus
      */
     function _executeWasmOnChain(
         bytes calldata wasm,
@@ -286,17 +277,17 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
         uint64 fuelLimit,
         uint64 memLimit
     ) internal returns (bytes memory) {
-        try IStylusWasmExecutor(stylusExecutor).execute(
-            wasm,
-            input,
-            fuelLimit,
-            memLimit
-        ) returns (bytes memory output) {
-            return output;
-        } catch {
-            // Return sentinel on error
-            return abi.encodePacked("STYLUS_ERROR");
-        }
+        // Direct call to Stylus - either precompile or deployed verifier
+        address executor = stylusExecutor == address(0)
+            ? address(0x0000000000000000000000000000000000000072)  // Native precompile
+            : stylusExecutor;                                       // Deployed verifier
+
+        // Single call with gas limit
+        (bool success, bytes memory output) = executor.call{gas: uint256(fuelLimit) * 100}(
+            abi.encode(wasm, input, memLimit)
+        );
+
+        return success ? output : bytes("STYLUS_ERROR");
     }
 
     /**

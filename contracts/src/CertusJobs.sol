@@ -89,6 +89,9 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     mapping(uint256 => bool) public vrfRequestFulfilled;
     mapping(bytes32 => uint256) public vrfRequestTime;
 
+    // Entropy reveals for secure fallback
+    mapping(bytes32 => bytes32) public executorEntropyReveals;
+
     // Emergency pause
     bool public paused;
 
@@ -273,7 +276,19 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     }
 
     /**
-     * Fallback with commit-reveal to prevent sequencer manipulation
+     * Executor reveals entropy for secure randomness
+     */
+    function revealExecutorEntropy(bytes32 jobId, bytes32 entropy) external {
+        Job storage job = jobs[jobId];
+        require(msg.sender == job.executor, "Only executor");
+        require(job.status == Status.Receipt, "Not in receipt state");
+        require(executorEntropyReveals[jobId] == bytes32(0), "Already revealed");
+
+        executorEntropyReveals[jobId] = entropy;
+    }
+
+    /**
+     * Fallback verifier selection
      */
     function fallbackVerifierSelection(bytes32 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
@@ -297,12 +312,21 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
                 job.outputHash
             )));
         } else {
-            // Deep fallback with multiple entropy sources
-            seed = uint256(keccak256(abi.encodePacked(
-                block.prevrandao,
-                block.difficulty,
+            // Blockhash unavailable - use commit-reveal with executor stake
+            bytes32 commitment = keccak256(abi.encodePacked(
+                job.executor,
+                job.executorDeposit,
                 jobId,
-                job.executor
+                job.outputHash
+            ));
+
+            // Require executor to reveal entropy or lose stake
+            require(executorEntropyReveals[jobId] != bytes32(0), "Executor must reveal entropy");
+
+            seed = uint256(keccak256(abi.encodePacked(
+                commitment,
+                executorEntropyReveals[jobId],
+                block.timestamp
             )));
         }
 

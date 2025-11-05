@@ -571,31 +571,33 @@ contract CertusToken is ERC20, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Calculate dynamic subsidy per verifier
-     * @return Subsidy amount in USDC (6 decimals) per verifier
-     *
-     * @dev Subsidy = max(0, TARGET_INCOME - feeIncome - certusEmissions)
-     * Guarantees $200/month minimum income regardless of growth rate.
+     * Calculate verifier subsidy based on protocol revenue
      */
     function calculateDynamicSubsidy() public view returns (uint256) {
         if (activeVerifierCount == 0) return 0;
 
-        // Fee income per verifier (USDC, 6 decimals)
-        uint256 feeIncomePerVerifier = totalMonthlyFees / activeVerifierCount;
-
-        // CERTUS emissions per verifier (static pricing during bootstrap phase)
-        // Production: integrate Chainlink price feed for dynamic USD conversion
-        uint256 monthlyEmission = getMonthlyEmission();
-        uint256 certusPerVerifier = monthlyEmission / activeVerifierCount;
-        uint256 certusValueUSD = (certusPerVerifier * 5) / 100; // $0.05 per CERTUS * emissions
-
-        uint256 currentIncome = feeIncomePerVerifier + certusValueUSD;
-
-        if (currentIncome >= TARGET_VERIFIER_INCOME) {
-            return 0; // No subsidy needed
+        // Minimum protocol revenue threshold: $10k/month
+        uint256 MIN_PROTOCOL_REVENUE = 10_000 * 10**6;
+        if (totalMonthlyFees < MIN_PROTOCOL_REVENUE) {
+            return 0;
         }
 
-        return TARGET_VERIFIER_INCOME - currentIncome;
+        uint256 feeIncomePerVerifier = totalMonthlyFees / activeVerifierCount;
+
+        uint256 monthlyEmission = getMonthlyEmission();
+        uint256 certusPerVerifier = monthlyEmission / activeVerifierCount;
+
+        // Minimum income target: $50/month
+        uint256 MIN_VIABLE_INCOME = 50 * 10**6;
+        if (feeIncomePerVerifier >= MIN_VIABLE_INCOME) {
+            return 0;
+        }
+
+        // Cap at 10% of revenue
+        uint256 maxSubsidy = totalMonthlyFees / 10;
+        uint256 neededSubsidy = MIN_VIABLE_INCOME - feeIncomePerVerifier;
+
+        return neededSubsidy > maxSubsidy ? maxSubsidy : neededSubsidy;
     }
 
     /**
