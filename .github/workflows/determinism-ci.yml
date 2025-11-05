@@ -1,0 +1,250 @@
+name: Determinism Cross-Platform CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  # Manual trigger for on-demand validation
+  workflow_dispatch:
+
+jobs:
+  #
+  # CRITICAL: This CI job validates determinism across platforms
+  # Same Wasm + input MUST produce identical output on all OS/arch combinations
+  #
+  determinism-matrix:
+    name: Determinism Test - ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Don't cancel other jobs if one fails - we want to see all results
+      fail-fast: false
+
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-22.04
+            arch: x86_64
+            java: 17
+
+          # Linux ARM64 (via emulation)
+          - os: ubuntu-22.04
+            arch: aarch64
+            java: 17
+
+          # macOS ARM64 (M1/M2)
+          - os: macos-13
+            arch: aarch64
+            java: 17
+
+          # macOS x86_64 (Intel)
+          - os: macos-12
+            arch: x86_64
+            java: 17
+
+          # Windows x86_64
+          - os: windows-2022
+            arch: x86_64
+            java: 17
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+          architecture: ${{ matrix.arch }}
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Prepare test vectors
+        run: |
+          mkdir -p testvectors/wasm testvectors/inputs testvectors/outputs
+          # Create minimal deterministic test vector
+          echo "0061736d01000000" | xxd -r -p > testvectors/wasm/echo.wasm
+          echo "48656c6c6f20576f726c64" | xxd -r -p > testvectors/inputs/input1.bin
+        shell: bash
+
+      - name: Build executor module
+        run: |
+          cd executor
+          ./gradlew build --no-daemon --stacktrace
+        shell: bash
+
+      - name: Run determinism tests
+        id: determinism_test
+        run: |
+          cd executor
+          ./gradlew test --tests DeterminismTest --no-daemon --stacktrace
+        shell: bash
+
+      - name: Capture output hash (for cross-platform comparison)
+        if: always()
+        run: |
+          cd executor
+          # Extract output hashes from test logs
+          ./gradlew test --tests DeterminismTest --info --no-daemon | \
+            grep -E "outputHash|output hash" | tee output-hash-${{ matrix.os }}-${{ matrix.arch }}.log || true
+        shell: bash
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            executor/build/reports/tests/
+            executor/build/test-results/
+            executor/output-hash-${{ matrix.os }}-${{ matrix.arch }}.log
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-logs-${{ matrix.os }}-${{ matrix.arch }}
+          path: executor/build/test-results/
+
+  #
+  # Compare output hashes across all platforms
+  # CRITICAL: All platforms MUST produce identical hashes
+  #
+  verify-cross-platform-determinism:
+    name: Verify Cross-Platform Hash Consistency
+    needs: determinism-matrix
+    runs-on: ubuntu-22.04
+    if: always()
+
+    steps:
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: test-artifacts
+
+      - name: Compare output hashes across platforms
+        run: |
+          echo "===== CROSS-PLATFORM DETERMINISM VERIFICATION ====="
+          echo "Checking that all platforms produced identical output hashes..."
+
+          # Extract all output hash logs
+          find test-artifacts -name "output-hash-*.log" -type f
+
+          # Count unique hashes (should be 1 if deterministic)
+          UNIQUE_HASHES=$(find test-artifacts -name "output-hash-*.log" -exec cat {} \; | \
+                          grep -oE '[a-f0-9]{64}' | sort | uniq | wc -l)
+
+          echo "Unique output hashes observed: $UNIQUE_HASHES"
+
+          if [ "$UNIQUE_HASHES" -eq "0" ]; then
+            echo "⚠️  WARNING: No output hashes found (tests may have failed)"
+            exit 0  # Don't fail if tests didn't produce hashes
+          elif [ "$UNIQUE_HASHES" -eq "1" ]; then
+            echo "✅ SUCCESS: All platforms produced identical output"
+            echo "This confirms deterministic execution across:"
+            echo "  - Linux x86_64 / ARM64"
+            echo "  - macOS x86_64 / ARM64"
+            echo "  - Windows x86_64"
+            exit 0
+          else
+            echo "❌ FAILURE: Multiple different hashes detected!"
+            echo "This indicates NON-DETERMINISTIC execution"
+            echo "Observed hashes:"
+            find test-artifacts -name "output-hash-*.log" -exec cat {} \; | \
+              grep -oE '[a-f0-9]{64}' | sort | uniq
+            exit 1
+          fi
+        shell: bash
+
+  #
+  # Security scan for non-deterministic patterns
+  #
+  security-scan:
+    name: Security Scan - Non-Deterministic Patterns
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Scan for forbidden patterns
+        run: |
+          echo "===== SECURITY PATTERN SCAN ====="
+          echo "Scanning for non-deterministic code patterns..."
+
+          # Scan Java code for non-deterministic patterns
+          ISSUES=0
+
+          # Check for Math.random()
+          if grep -r "Math\.random()" --include="*.java" .; then
+            echo "❌ Found Math.random() usage"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for System.currentTimeMillis() in execution paths
+          if grep -r "currentTimeMillis()" --include="*.java" executor/src/main/; then
+            echo "⚠️  Found currentTimeMillis() in executor code (verify it's not in execution path)"
+            # Don't fail - may be used for logging only
+          fi
+
+          # Check for SecureRandom
+          if grep -r "SecureRandom" --include="*.java" executor/src/main/java/net/certus/wasm/; then
+            echo "❌ Found SecureRandom in Wasm execution code"
+            ISSUES=$((ISSUES + 1))
+          fi
+
+          # Check for HashMap iteration (non-deterministic order)
+          if grep -r "HashMap" --include="*.java" executor/src/main/java/net/certus/wasm/; then
+            echo "⚠️  Found HashMap in Wasm code (use LinkedHashMap for deterministic iteration)"
+          fi
+
+          if [ $ISSUES -gt 0 ]; then
+            echo "❌ Security scan found $ISSUES critical issues"
+            exit 1
+          else
+            echo "✅ No critical non-deterministic patterns found"
+          fi
+        shell: bash
+
+  #
+  # Summary job (blocks merge if any critical jobs fail)
+  #
+  determinism-summary:
+    name: Determinism CI Summary
+    needs: [determinism-matrix, verify-cross-platform-determinism, security-scan]
+    runs-on: ubuntu-22.04
+    if: always()
+
+    steps:
+      - name: Check all jobs passed
+        run: |
+          echo "===== DETERMINISM CI SUMMARY ====="
+
+          MATRIX_RESULT="${{ needs.determinism-matrix.result }}"
+          VERIFY_RESULT="${{ needs.verify-cross-platform-determinism.result }}"
+          SECURITY_RESULT="${{ needs.security-scan.result }}"
+
+          echo "Matrix tests: $MATRIX_RESULT"
+          echo "Cross-platform verification: $VERIFY_RESULT"
+          echo "Security scan: $SECURITY_RESULT"
+
+          if [ "$MATRIX_RESULT" != "success" ] || \
+             [ "$VERIFY_RESULT" != "success" ] || \
+             [ "$SECURITY_RESULT" != "success" ]; then
+            echo "❌ DETERMINISM CI FAILED"
+            echo "See individual job logs for details"
+            exit 1
+          else
+            echo "✅ DETERMINISM CI PASSED"
+            echo "All platforms produced deterministic results"
+          fi

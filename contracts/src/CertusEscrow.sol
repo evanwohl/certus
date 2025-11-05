@@ -56,19 +56,42 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
         stylusExecutor = _stylusExecutor;
     }
 
+    // MEV protection: commit hash first
+    mapping(bytes32 => bytes32) public fraudCommitments;
+    mapping(bytes32 => uint256) public fraudCommitTime;
+
     /**
-     * Submit fraud proof
+     * Commit fraud proof hash (MEV protection step 1)
+     */
+    function commitFraud(bytes32 jobId, bytes32 commitment) external {
+        Job memory job = jobsModule.getJob(jobId);
+        require(job.status == Status.Receipt, "Not in receipt state");
+        require(_isSelectedVerifier(jobId, msg.sender), "Not selected verifier");
+
+        fraudCommitments[jobId] = commitment;
+        fraudCommitTime[jobId] = block.timestamp;
+    }
+
+    /**
+     * Reveal fraud proof after commit (MEV protection step 2)
      */
     function fraudOnChain(
         bytes32 jobId,
         bytes calldata wasm,
         bytes calldata input,
-        bytes calldata claimedOutput
+        bytes calldata claimedOutput,
+        uint256 nonce
     ) external whenNotPaused nonReentrant {
         Job memory job = jobsModule.getJob(jobId);
         require(job.status == Status.Receipt, "Not in receipt state");
 
-        // Handle VRF pending case - allow fallback trigger after grace period
+        // MEV protection: verify commitment
+        bytes32 commitment = keccak256(abi.encodePacked(jobId, wasm, input, claimedOutput, nonce, msg.sender));
+        require(fraudCommitments[jobId] == commitment, "Invalid commitment");
+        require(block.timestamp >= fraudCommitTime[jobId] + 2 minutes, "Reveal too early");
+        require(block.timestamp <= fraudCommitTime[jobId] + 10 minutes, "Reveal too late");
+
+        // Handle VRF pending case
         if (job.selectedVerifiers[0] == address(0)) {
             require(
                 block.timestamp > jobsModule.vrfRequestTime(jobId) + VRF_RETRY_GRACE_PERIOD,
@@ -81,19 +104,23 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
         require(sha256(wasm) == job.wasmHash, "Wasm hash mismatch");
         require(sha256(input) == job.inputHash, "Input hash mismatch");
 
-        // Execute on-chain
+        // Gas optimization: force bisection for large jobs
+        if (wasm.length > 1000 || input.length > 1000) {
+            // Large job - must use bisection to avoid gas DOS
+            revert("Job too large for direct proof - use initiateBisection");
+        }
+
+        // Small job - execute on-chain
         bytes memory recomputedOutput = _executeWasmOnChain(wasm, input, job.fuelLimit, job.memLimit);
 
         // Check for abort sentinel
         if (keccak256(recomputedOutput) == keccak256("STYLUS_ERROR")) {
-            // execution failed - job invalid, refund client
             _handleAbort(jobId, job);
             return;
         }
 
         bytes32 recomputedHash = sha256(recomputedOutput);
         if (recomputedHash != job.outputHash) {
-            // Fraud detected
             _handleFraud(jobId, job, msg.sender);
         } else {
             revert("No fraud detected");

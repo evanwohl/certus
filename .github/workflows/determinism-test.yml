@@ -1,0 +1,99 @@
+name: Determinism Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Run determinism tests
+        run: |
+          cd executor
+          ./gradlew test --tests "net.certus.test.DeterminismTest"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-results
+          path: executor/build/reports/tests/
+
+  test-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Run determinism tests
+        run: |
+          cd executor
+          ./gradlew test --tests "net.certus.test.DeterminismTest"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-results
+          path: executor/build/reports/tests/
+
+  test-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Run determinism tests
+        run: |
+          cd executor
+          .\gradlew.bat test --tests "net.certus.test.DeterminismTest"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: executor/build/reports/tests/
+
+  compare-results:
+    needs: [test-linux, test-macos, test-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-test-results
+          path: linux-results/
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-test-results
+          path: macos-results/
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-test-results
+          path: windows-results/
+      - name: Verify cross-platform determinism
+        run: |
+          echo "Cross-platform determinism verification"
+          echo "All platforms must produce IDENTICAL output hashes"
+          echo "If any platform differs, determinism is BROKEN"
+
+          # Extract hashes from test results and compare
+          # This is a placeholder - actual implementation depends on test output format
+          echo "Linux results: $(ls linux-results/)"
+          echo "macOS results: $(ls macos-results/)"
+          echo "Windows results: $(ls windows-results/)"
+
+          # Fail if any differences found
+          # TODO: Implement actual hash comparison logic

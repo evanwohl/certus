@@ -3,34 +3,56 @@ version: '3.8'
 services:
   executor:
     build:
-      context: .
-      dockerfile: executor/Dockerfile
+      context: ./node
+      dockerfile: Dockerfile
     environment:
-      - PRIVATE_KEY=${EXECUTOR_PRIVATE_KEY}
-      - ESCROW_ADDRESS=${ESCROW_ADDRESS}
       - RPC_URL=${RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
-      - REGION=${REGION:-NA}
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./executor/config.yml:/app/config.yml
+      - PRIVATE_KEY=${EXECUTOR_KEY}
+      - CONTRACT_ADDRESS=${CONTRACT_ADDRESS}
+      - RUST_LOG=info
+    command: ["executor"]
     restart: unless-stopped
     networks:
       - certus
 
-  verifier:
+  verifier-1:
     build:
-      context: .
-      dockerfile: verifier/Dockerfile
+      context: ./node
+      dockerfile: Dockerfile
     environment:
-      - PRIVATE_KEY=${VERIFIER_PRIVATE_KEY}
-      - ESCROW_ADDRESS=${ESCROW_ADDRESS}
       - RPC_URL=${RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
-      - REGION=${REGION:-NA}
-    ports:
-      - "8081:8081"
-    volumes:
-      - ./verifier/config.yml:/app/config.yml
+      - PRIVATE_KEY=${VERIFIER_KEY_1}
+      - CONTRACT_ADDRESS=${CONTRACT_ADDRESS}
+      - RUST_LOG=info
+    command: ["verifier"]
+    restart: unless-stopped
+    networks:
+      - certus
+
+  verifier-2:
+    build:
+      context: ./node
+      dockerfile: Dockerfile
+    environment:
+      - RPC_URL=${RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
+      - PRIVATE_KEY=${VERIFIER_KEY_2}
+      - CONTRACT_ADDRESS=${CONTRACT_ADDRESS}
+      - RUST_LOG=info
+    command: ["verifier"]
+    restart: unless-stopped
+    networks:
+      - certus
+
+  verifier-3:
+    build:
+      context: ./node
+      dockerfile: Dockerfile
+    environment:
+      - RPC_URL=${RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}
+      - PRIVATE_KEY=${VERIFIER_KEY_3}
+      - CONTRACT_ADDRESS=${CONTRACT_ADDRESS}
+      - RUST_LOG=info
+    command: ["verifier"]
     restart: unless-stopped
     networks:
       - certus

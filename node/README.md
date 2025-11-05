@@ -1,29 +1,40 @@
-# Certus Node Components
+# Certus Node
 
-Java implementation of Certus protocol components.
+Rust implementation of executor and verifier nodes.
 
-## Modules
+## Architecture
 
-- **client** - SDK for submitting jobs and interacting with escrow
-- **executor** - Node that accepts and executes compute jobs
-- **verifier** - Node that validates executor results and submits fraud proofs
-- **proto** - gRPC protocol definitions and generated code
+```
+common/         # Shared types and crypto
+executor/       # Runs WebAssembly jobs
+verifier/       # Verifies execution results
+```
 
 ## Build
 
 ```bash
-./gradlew clean build
+cargo build --release
 ```
 
-## Run Tests
+## Run
 
 ```bash
-./gradlew test
+# Executor
+./target/release/executor <rpc_url> <private_key> <contract_address>
+
+# Verifier
+./target/release/verifier <rpc_url> <private_key> <contract_address>
 ```
 
-## Requirements
+## Configuration
 
-- Java 17 or higher
-- Gradle 8.5
-- 4GB RAM minimum
-- Arbitrum Sepolia RPC endpoint
+- `rpc_url`: Arbitrum RPC endpoint
+- `private_key`: Ethereum private key (with USDC for collateral)
+- `contract_address`: Deployed CertusEscrow contract
+
+## Docker
+
+```bash
+docker build -t certus-node .
+docker run certus-node executor <args>
+```

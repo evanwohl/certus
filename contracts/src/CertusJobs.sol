@@ -273,7 +273,7 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     }
 
     /**
-     * Fallback verifier selection when VRF fails
+     * Fallback with commit-reveal to prevent sequencer manipulation
      */
     function fallbackVerifierSelection(bytes32 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
@@ -283,15 +283,28 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         uint256 requestId = jobIdToVrfRequest[jobId];
         require(!vrfRequestFulfilled[requestId], "VRF already fulfilled");
 
-        // Use blockhash as fallback randomness
-        uint256 blocksSince = block.number - receiptBlockNumber[jobId];
-        require(blocksSince < VRF_FALLBACK_BLOCKS, "Too many blocks passed");
+        // Commit-reveal: wait 15 blocks after receipt for unpredictable entropy
+        uint256 commitBlock = receiptBlockNumber[jobId] + 15;
+        require(block.number > commitBlock, "Wait for commit period");
 
-        uint256 seed = uint256(keccak256(abi.encodePacked(
-            blockhash(receiptBlockNumber[jobId] + 1),
-            jobId,
-            block.timestamp
-        )));
+        uint256 seed;
+        if (block.number - commitBlock <= 240) {
+            // Use future blocks that couldn't be predicted
+            seed = uint256(keccak256(abi.encodePacked(
+                blockhash(commitBlock),
+                blockhash(commitBlock - 1),
+                jobId,
+                job.outputHash
+            )));
+        } else {
+            // Deep fallback with multiple entropy sources
+            seed = uint256(keccak256(abi.encodePacked(
+                block.prevrandao,
+                block.difficulty,
+                jobId,
+                job.executor
+            )));
+        }
 
         (address[3] memory selected, address[3] memory backup) =
             verifierContract.selectVerifiersWithVRF(jobId, job.payToken, seed, seed >> 128);

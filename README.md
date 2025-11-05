@@ -1,6 +1,6 @@
 # Certus
 
-Verifiable compute protocol for trustless off-chain execution. Submit Wasm jobs with collateral, executors run them off-chain, verifiers check results. If someone lies, fraud proof runs on-chain via Arbitrum Stylus.
+Trustless deterministic compute via WebAssembly fraud proofs.
 
 **Problem:** Can't trust centralized compute providers. Existing solutions use committees (weak security) or expensive ZK proofs (impractical for general compute).
 
@@ -26,69 +26,53 @@ Verifiable compute protocol for trustless off-chain execution. Submit Wasm jobs 
 
 ## Build
 
-Prerequisites: Java 17, Foundry (for contracts)
+Prerequisites: Rust 1.75+, Foundry
 
 ```bash
-# Build Java components
-cd node
-./gradlew clean build
+# Setup environment
+./scripts/setup-env.sh
+
+# Build Rust nodes
+./scripts/build-rust.sh
 
 # Run tests
-./gradlew test
-```
-
-If Gradle wrapper missing:
-```bash
-cd node
-gradle wrapper --gradle-version 8.5
+cargo test --all
 ```
 
 ## Deploy Contracts
 
 ```bash
-cd contracts
+# Deploy to Arbitrum testnet
+./scripts/deploy.sh testnet
 
-# Install Foundry if needed
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
-
-# Compile contracts
-forge build
-
-# Deploy to Arbitrum Sepolia
-forge script script/Deploy.s.sol \
-  --rpc-url https://sepolia-rollup.arbitrum.io/rpc \
-  --private-key $PRIVATE_KEY \
-  --broadcast
+# Or deploy to mainnet
+./scripts/deploy.sh mainnet
 ```
 
-## Run Local Network
+Requires `.env.testnet` or `.env.mainnet` with your keys.
 
-Copy example configs:
+## Run Nodes
+
 ```bash
-cp node/executor/config.yml.example node/executor/config.yml
-cp node/verifier/config.yml.example node/verifier/config.yml
-```
+# Set environment variables
+export RPC_URL="https://sepolia-rollup.arbitrum.io/rpc"
+export EXECUTOR_KEY="your_executor_private_key"
+export VERIFIER_KEY="your_verifier_private_key"
+export CONTRACT_ADDRESS="deployed_contract_address"
 
-Edit configs with your RPC URL, private keys, and deployed contract address.
+# Start both nodes
+./scripts/run-nodes.sh
 
-Start executor:
-```bash
-cd node/executor
-../gradlew run
-```
-
-Start verifier (separate terminal):
-```bash
-cd node/verifier
-../gradlew run
+# Or run individually:
+./target/release/executor $RPC_URL $EXECUTOR_KEY $CONTRACT_ADDRESS
+./target/release/verifier $RPC_URL $VERIFIER_KEY $CONTRACT_ADDRESS
 ```
 
 ## Submit Test Job
 
 ```bash
-cd node/client
-../gradlew run --args="--wasm ../../testvectors/wasm/sha256.wasm --input ../../testvectors/inputs/input1.bin --payment 1000000"
+# Submit a job with test vectors
+./scripts/submit-job.sh testvectors/sha256.wasm testvectors/input1.bin 50000000
 ```
 
 Expected output:
@@ -103,17 +87,12 @@ Job finalized in 18s
 ## Project Structure
 
 ```
-contracts/       Solidity escrow + token contracts
-node/
-  client/        Java SDK for job submission
-  executor/      Executor node (runs jobs)
-  verifier/      Verifier node (checks results)
-  proto/         gRPC service definitions
-examples/
-  analyzer/      Static analyzer for detecting contract rug pulls
-  verifiedpump/  Token launchpad demo (uses analyzer via Certus)
-testvectors/     Test Wasm modules with known outputs
-scripts/         Build and deployment automation
+contracts/       # Solidity contracts (Arbitrum)
+node/            # Rust implementation
+  executor/      # Compute executor
+  verifier/      # Fraud verifier
+  common/        # Shared types and crypto
+testvectors/     # WebAssembly test modules
 ```
 
 ## Economics
@@ -201,24 +180,20 @@ CERTUS token has 7 utilities:
 
 ## Development
 
-Run determinism tests (critical):
+Run all tests:
 ```bash
-cd node
-./gradlew :executor:test --tests "net.certus.test.DeterminismTest"
+cargo test --all
 ```
 
-This validates test vectors produce identical outputs on Linux/Mac/Windows.
-
-Compile test Wasm modules:
+Test determinism:
 ```bash
-cd scripts
-./compile-test-wasm.sh
+./scripts/test-determinism.sh
 ```
 
-Verify build integrity:
+Build Docker images:
 ```bash
-cd scripts
-./verify-build.sh
+./scripts/docker-build.sh
+docker-compose up -d
 ```
 
 

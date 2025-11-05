@@ -1,0 +1,14 @@
+[package]
+name = "certus-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ethers = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
