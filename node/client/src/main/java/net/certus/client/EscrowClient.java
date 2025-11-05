@@ -282,13 +282,37 @@ public class EscrowClient {
     }
 
     /**
-     * Get executor collateral multiplier from CERTUS token contract.
-     * Returns basis points (10000 = 1.0x, 8000 = 0.8x, 6000 = 0.6x)
+     * Sends verifier heartbeat to maintain online status.
+     *
+     * @return Transaction receipt
+     * @throws Exception if transaction fails
      */
-    public int getExecutorCollateralMultiplier(String executorAddress, String certusTokenAddress) throws Exception {
-        // Returns default 1.0x collateral requirement (10000 bps)
-        // Production: query CERTUS token contract for executor stake-based discount
-        return 10000;
+    public TransactionReceipt sendVerifierHeartbeat() throws Exception {
+        Function function = new Function(
+            "verifierHeartbeat",
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+
+        String encodedFunction = FunctionEncoder.encode(function);
+
+        EthSendTransaction ethSendTx = txManager.sendTransaction(
+            DefaultGasProvider.GAS_PRICE,
+            BigInteger.valueOf(100_000), // Low gas for simple state update
+            contractAddress,
+            encodedFunction,
+            BigInteger.ZERO
+        );
+
+        String txHash = ethSendTx.getTransactionHash();
+        return waitForReceipt(txHash);
+    }
+
+    /**
+     * Collateral is 2.0x fixed.
+     */
+    public int getExecutorCollateralMultiplier(String executorAddress, String certusTokenAddress) {
+        return 20000; // 2.0x in basis points
     }
 
     /**

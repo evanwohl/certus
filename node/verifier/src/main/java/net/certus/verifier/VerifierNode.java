@@ -42,14 +42,14 @@ public class VerifierNode {
     }
 
     /**
-     * Start the verifier node.
+     * Starts verifier node with monitoring and heartbeat.
      */
     public void start() {
         logger.info("Starting VerifierNode...");
         running = true;
 
-        // Start receipt monitoring thread
         executorService.submit(this::monitorReceipts);
+        executorService.submit(this::heartbeatLoop);
 
         logger.info("VerifierNode started");
     }
@@ -89,6 +89,38 @@ public class VerifierNode {
         }
 
         logger.info("Receipt monitoring stopped");
+    }
+
+    /**
+     * Maintains verifier online status via heartbeat.
+     */
+    private void heartbeatLoop() {
+        logger.info("Heartbeat loop started");
+
+        while (running) {
+            try {
+                escrowClient.sendVerifierHeartbeat();
+                logger.debug("Heartbeat sent");
+
+                // 8 minute interval (requirement is 10 min)
+                Thread.sleep(8 * 60 * 1000);
+
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                logger.error("Heartbeat failed: {}", e.getMessage());
+                // Retry after 30 seconds on failure
+                try {
+                    Thread.sleep(30 * 1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
+        logger.info("Heartbeat loop stopped");
     }
 
     /**
@@ -162,11 +194,14 @@ public class VerifierNode {
     }
 
     /**
-     * Submit fraud proof to contract.
+     * Submits fraud proof after verifier selection.
+     *
      * @param jobId Job identifier
-     * @param wasmBytes Full Wasm module
-     * @param inputBytes Full input data
-     * @param claimedOutput Executor's claimed output
+     * @param wasmBytes WebAssembly module
+     * @param inputBytes Input data
+     * @param claimedOutput Output claimed by executor
+     * @return Transaction receipt
+     * @throws Exception if submission fails or VRF pending
      */
     public TransactionReceipt submitFraudProof(
         byte[] jobId,
@@ -174,14 +209,19 @@ public class VerifierNode {
         byte[] inputBytes,
         byte[] claimedOutput
     ) throws Exception {
-        logger.info("Submitting fraud proof: jobId={}", CertusHash.toHex(jobId));
+        logger.info("Submitting fraud proof: {}", CertusHash.toHex(jobId));
 
-        TransactionReceipt receipt = escrowClient.submitFraud(jobId, wasmBytes, inputBytes, claimedOutput);
-
-        logger.info("Fraud proof submitted: jobId={}, txHash={}",
-            CertusHash.toHex(jobId), receipt.getTransactionHash());
-
-        return receipt;
+        // Contract will check VRF status and revert if pending
+        try {
+            TransactionReceipt receipt = escrowClient.submitFraud(jobId, wasmBytes, inputBytes, claimedOutput);
+            logger.info("Fraud proof accepted: tx={}", receipt.getTransactionHash());
+            return receipt;
+        } catch (Exception e) {
+            if (e.getMessage().contains("VRF pending")) {
+                logger.warn("VRF pending for job {}, retry after fallback", CertusHash.toHex(jobId));
+            }
+            throw e;
+        }
     }
 
     /**

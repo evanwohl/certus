@@ -45,9 +45,10 @@ public class ExecutorNode {
     private final int maxCollateralRatioBps;
     private final String certusTokenAddress;
     private final ExecutorService executorService;
+    private final Object jobLock = new Object();
 
     private volatile boolean running = false;
-    private volatile int cachedCollateralMultiplier = 10000; // 1.0x default (basis points)
+    private static final int COLLATERAL_RATIO = 20000; // 2.0x in basis points
 
     public ExecutorNode(
         String rpcUrl,
@@ -76,52 +77,21 @@ public class ExecutorNode {
         updateCapitalEfficiency();
     }
 
-    /**
-     * Update capital efficiency from CERTUS token contract.
-     * Called on startup and periodically.
-     */
     private void updateCapitalEfficiency() {
-        try {
-            int multiplier = escrowClient.getExecutorCollateralMultiplier(executorAddress, certusTokenAddress);
-            cachedCollateralMultiplier = multiplier;
-
-            String efficiency = multiplier == 6000 ? "0.6x (50k CERTUS)" :
-                               multiplier == 8000 ? "0.8x (10k CERTUS)" : "1.0x (no boost)";
-
-            logger.info("Capital efficiency updated: multiplier={}bps ({})", multiplier, efficiency);
-        } catch (Exception e) {
-            logger.warn("Failed to query capital efficiency: {}", e.getMessage());
-            cachedCollateralMultiplier = 10000; // Default to 1.0x
-        }
+        // No-op: collateral ratio is constant
     }
 
-    /**
-     * Check if job is acceptable based on collateral requirements and capital limits.
-     */
     public boolean canAcceptJob(JobSpec jobSpec) {
-        // Check collateral ratio is within acceptable range
-        int jobCollateralRatioBps = jobSpec.getCollateralRatioBps();
-        if (jobCollateralRatioBps < minCollateralRatioBps || jobCollateralRatioBps > maxCollateralRatioBps) {
-            logger.debug("Job {} rejected: collateral ratio {}bps outside range {}-{}",
-                CertusHash.toHex(jobSpec.getJobId()), jobCollateralRatioBps,
-                minCollateralRatioBps, maxCollateralRatioBps);
+        BigInteger requiredCollateral = jobSpec.getPayAmt().multiply(BigInteger.valueOf(2));
+
+        if (requiredCollateral.compareTo(maxCollateralCapital) > 0) {
+            logger.debug("Job {} rejected: collateral {} exceeds capital {}",
+                CertusHash.toHex(jobSpec.getJobId()), requiredCollateral, maxCollateralCapital);
             return false;
         }
 
-        // Calculate effective collateral requirement with CERTUS boost
-        BigInteger baseCollateral = jobSpec.getPayAmt().multiply(BigInteger.valueOf(jobCollateralRatioBps)).divide(BigInteger.valueOf(100));
-        BigInteger effectiveCollateral = baseCollateral.multiply(BigInteger.valueOf(cachedCollateralMultiplier)).divide(BigInteger.valueOf(10000));
-
-        if (effectiveCollateral.compareTo(maxCollateralCapital) > 0) {
-            logger.debug("Job {} rejected: effective collateral {} exceeds max capital {}",
-                CertusHash.toHex(jobSpec.getJobId()), effectiveCollateral, maxCollateralCapital);
-            return false;
-        }
-
-        logger.info("Job {} accepted: payment={}, ratio={}bps, effectiveCollateral={} ({}x boost)",
-            CertusHash.toHex(jobSpec.getJobId()), jobSpec.getPayAmt(), jobCollateralRatioBps,
-            effectiveCollateral, cachedCollateralMultiplier / 10000.0);
-
+        logger.info("Job {} acceptable: payment={}, collateral={}",
+            CertusHash.toHex(jobSpec.getJobId()), jobSpec.getPayAmt(), requiredCollateral);
         return true;
     }
 
@@ -202,68 +172,68 @@ public class ExecutorNode {
     }
 
     /**
-     * Accept and execute a job.
-     * @param jobSpec Job specification
-     * @param wasmBytes Wasm module bytecode
-     * @param inputBytes Input data
+     * Executes a compute job through the complete lifecycle.
+     *
+     * @param jobSpec Job specification containing payment and resource limits
+     * @param wasmBytes WebAssembly module bytecode
+     * @param inputBytes Input data for the computation
+     * @return ExecReceipt containing signed output hash
+     * @throws ExecutionException if Wasm execution fails
+     * @throws Exception if on-chain operations fail
      */
-    public ExecReceipt executeJob(JobSpec jobSpec, byte[] wasmBytes, byte[] inputBytes) throws Exception {
+    public synchronized ExecReceipt executeJob(JobSpec jobSpec, byte[] wasmBytes, byte[] inputBytes) throws Exception {
         byte[] jobId = jobSpec.getJobId();
-        logger.info("Executing job: {}", CertusHash.toHex(jobId));
+        logger.info("Processing job: {}", CertusHash.toHex(jobId));
 
-        // 1. Validate job parameters
+        // Validate before any state changes
         validateJob(jobSpec, wasmBytes, inputBytes);
 
-        // 2. Accept job on-chain (post effective collateral with CERTUS boost)
+        // Accept on-chain (locks collateral)
         acceptJobOnChain(jobId, jobSpec);
 
-        // 3. Execute in Wasm sandbox
-        WasmSandbox.ExecutionResult result = wasmSandbox.execute(
-            wasmBytes,
-            inputBytes,
-            new WasmSandbox.ExecutionConfig(
-                jobSpec.getFuelLimit(),
-                jobSpec.getMemLimit(),
-                jobSpec.getMaxOutputSize()
-            )
-        );
+        try {
+            WasmSandbox.ExecutionResult result = wasmSandbox.execute(
+                wasmBytes,
+                inputBytes,
+                new WasmSandbox.ExecutionConfig(
+                    jobSpec.getFuelLimit(),
+                    jobSpec.getMemLimit(),
+                    jobSpec.getMaxOutputSize()
+                )
+            );
 
-        if (!result.isSuccess()) {
-            logger.error("Execution failed for job {}: {}", CertusHash.toHex(jobId), result.getErrorMessage());
-            throw new ExecutionException("Execution failed: " + result.getErrorMessage());
-        }
+            if (!result.isSuccess()) {
+                throw new ExecutionException("Wasm execution failed: " + result.getErrorMessage());
+            }
 
-        byte[] output = result.getOutput();
-        byte[] outputHash = CertusHash.sha256(output);
+            byte[] output = result.getOutput();
+            byte[] outputHash = CertusHash.sha256(output);
 
-        logger.info("Execution successful: jobId={}, outputHash={}, fuelConsumed={}",
-            CertusHash.toHex(jobId), CertusHash.toHex(outputHash), result.getFuelConsumed());
+            logger.info("Execution complete: outputHash={}, fuel={}",
+                CertusHash.toHex(outputHash), result.getFuelConsumed());
 
-        // 4. Calculate effective deposit used
-        BigInteger baseCollateral = jobSpec.getPayAmt()
-            .multiply(BigInteger.valueOf(jobSpec.getCollateralRatioBps()))
-            .divide(BigInteger.valueOf(100));
-        BigInteger effectiveDeposit = baseCollateral
-            .multiply(BigInteger.valueOf(cachedCollateralMultiplier))
-            .divide(BigInteger.valueOf(10000));
+            // Sign with 2x collateral
+            BigInteger collateral = jobSpec.getPayAmt().multiply(BigInteger.valueOf(2));
+            ExecReceipt receipt = ExecReceipt.sign(
+                jobId,
+                jobSpec.getWasmHash(),
+                jobSpec.getInputHash(),
+                outputHash,
+                executorAddress,
+                collateral,
+                signingKey
+            );
 
-        // 5. Sign receipt
-        ExecReceipt receipt = ExecReceipt.sign(
-            jobId,
-            jobSpec.getWasmHash(),
-            jobSpec.getInputHash(),
-            outputHash,
-            executorAddress,
-            effectiveDeposit,
-            signingKey
-        );
+            // Submit receipt
+            submitReceiptOnChain(receipt);
+            logger.info("Receipt submitted: {}", CertusHash.toHex(jobId));
+            return receipt;
 
-        // 5. Submit receipt on-chain
-        submitReceiptOnChain(receipt);
-
-        logger.info("Receipt submitted for job: {}", CertusHash.toHex(jobId));
-
-        return receipt;
+        } catch (Exception e) {
+            // Critical: job accepted but execution/submission failed
+            logger.error("Job {} accepted but processing failed: {}",
+                CertusHash.toHex(jobId), e.getMessage());
+            throw e;
     }
 
     /**
@@ -297,29 +267,20 @@ public class ExecutorNode {
     }
 
     /**
-     * Accept job on-chain by posting effective collateral (with CERTUS boost).
+     * Posts 2x collateral and accepts job on-chain.
+     *
+     * @param jobId Job identifier
+     * @param jobSpec Job specification with payment details
+     * @throws Exception if transaction fails
      */
     private void acceptJobOnChain(byte[] jobId, JobSpec jobSpec) throws Exception {
-        logger.info("Accepting job on-chain: {}", CertusHash.toHex(jobId));
-
-        // Calculate effective collateral with CERTUS capital efficiency
-        BigInteger baseCollateral = jobSpec.getPayAmt()
-            .multiply(BigInteger.valueOf(jobSpec.getCollateralRatioBps()))
-            .divide(BigInteger.valueOf(100));
-
-        BigInteger effectiveCollateral = baseCollateral
-            .multiply(BigInteger.valueOf(cachedCollateralMultiplier))
-            .divide(BigInteger.valueOf(10000));
-
-        logger.info("Collateral calculation: base={}, multiplier={}bps, effective={}",
-            baseCollateral, cachedCollateralMultiplier, effectiveCollateral);
-
-        // Get token address from job spec
+        BigInteger collateral = jobSpec.getPayAmt().multiply(BigInteger.valueOf(2));
         String tokenAddress = jobSpec.getPayToken();
 
-        escrowClient.acceptJob(jobId, effectiveCollateral, tokenAddress);
+        logger.info("Accepting job {}: collateral={}, token={}",
+            CertusHash.toHex(jobId), collateral, tokenAddress);
 
-        logger.info("Job accepted on-chain with effective collateral: {}", effectiveCollateral);
+        escrowClient.acceptJob(jobId, collateral, tokenAddress);
     }
 
     /**

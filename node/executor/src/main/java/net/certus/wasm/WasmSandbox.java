@@ -10,20 +10,12 @@ import java.util.Arrays;
 
 /**
  * Deterministic Wasm sandbox for executing compute jobs.
- *
- * Enforces the following guarantees:
+ * Enforces:
  * - Deterministic execution: identical input produces identical output
  * - Resource isolation: no file I/O, network access, or syscalls
  * - Bounded execution: fuel metering limits instruction count
  * - Memory safety: configurable memory limits enforced
  * - Single-threaded execution: no concurrency primitives allowed
- *
- * The runtime implementation is configurable via the certus.wasm.runtime
- * system property. Supported values:
- * - "wasmtime": Production Wasmtime JNI runtime (requires native library)
- * - "deterministic": Deterministic reference implementation (SHA256-based)
- *
- * See docs/DeterminismPolicy.md for complete execution semantics.
  */
 public class WasmSandbox {
     private static final Logger logger = LoggerFactory.getLogger(WasmSandbox.class);
@@ -157,34 +149,34 @@ public class WasmSandbox {
     }
 
     /**
-     * Validate that a Wasm module complies with determinism policy.
+     * Validates Wasm module for deterministic execution.
      *
-     * Performs static analysis to ensure:
-     * - Valid Wasm binary format
-     * - No floating-point operations (unless soft-float)
-     * - No forbidden WASI imports
-     * - No thread-related instructions
-     *
-     * Note: Deep validation of instruction opcodes requires Wasmtime parser.
-     * Current implementation validates binary format only.
+     * @param wasmBytes WebAssembly module bytecode
+     * @return ValidationResult indicating compliance
      */
     public ValidationResult validateWasm(byte[] wasmBytes) {
         try {
             if (wasmBytes.length < 8) {
-                return ValidationResult.invalid("Wasm module too small");
+                return ValidationResult.invalid("Module too small");
             }
 
-            // Validate magic number: 0x00 0x61 0x73 0x6D (\0asm)
-            byte[] magic = Arrays.copyOfRange(wasmBytes, 0, 4);
-            if (magic[0] != 0x00 || magic[1] != 0x61 || magic[2] != 0x73 || magic[3] != 0x6D) {
-                return ValidationResult.invalid("Invalid Wasm magic header");
+            // Check magic: \0asm
+            if (wasmBytes[0] != 0x00 || wasmBytes[1] != 0x61 ||
+                wasmBytes[2] != 0x73 || wasmBytes[3] != 0x6D) {
+                return ValidationResult.invalid("Invalid magic");
             }
 
-            // Validate version: 0x01 0x00 0x00 0x00
-            if (wasmBytes.length >= 8) {
-                if (wasmBytes[4] != 0x01 || wasmBytes[5] != 0x00 ||
-                    wasmBytes[6] != 0x00 || wasmBytes[7] != 0x00) {
-                    return ValidationResult.invalid("Unsupported Wasm version");
+            // Check version 1.0
+            if (wasmBytes[4] != 0x01 || wasmBytes[5] != 0x00) {
+                return ValidationResult.invalid("Unsupported version");
+            }
+
+            // Scan for float opcodes (f32.* = 0x43-0x98, f64.* = 0x99-0xBF)
+            for (int i = 8; i < wasmBytes.length - 1; i++) {
+                byte opcode = wasmBytes[i];
+                if ((opcode >= 0x43 && opcode <= 0x98) ||
+                    (opcode >= 0x99 && opcode <= (byte)0xBF)) {
+                    return ValidationResult.invalid("Float operations forbidden");
                 }
             }
 

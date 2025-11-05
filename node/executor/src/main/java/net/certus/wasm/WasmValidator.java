@@ -7,22 +7,12 @@ import java.security.MessageDigest;
 import java.util.*;
 
 /**
- * Enhanced Wasm validator with multi-vector determinism testing.
- *
- * SECURITY CRITICAL: This class defends against Wasm modules that:
- * - Behave correctly on known test vectors but maliciously on real inputs
- * - Use non-deterministic instructions (rdrand, float ops, etc.)
- * - Import forbidden host functions
- *
+ * Wasm validator with multi-vector determinism testing.
  * Validation Strategy:
  * 1. Static bytecode analysis (detect forbidden opcodes)
  * 2. Multi-vector determinism testing (N runs × M vectors)
  * 3. Platform-agnostic validation (same results everywhere)
  *
- * Anti-Gaming Measures:
- * - Require MINIMUM 3 test vectors (ideally 10+)
- * - Community can add more test vectors post-registration
- * - Any fraud proof with new input/output pair invalidates module
  */
 public class WasmValidator {
     private static final Logger logger = LoggerFactory.getLogger(WasmValidator.class);
@@ -305,23 +295,17 @@ public class WasmValidator {
             boolean hasThreadOps = false;
             boolean hasForbiddenImports = false;
 
-            // Scan for floating-point opcodes
-            // f32 instructions: 0x38-0x44, 0x8B-0x94, 0x95-0x98, 0xBE
-            // f64 instructions: 0x44-0x4C, 0x99-0xA6
+            // Scan for float opcodes
             for (int i = 0; i < wasmBytes.length - 1; i++) {
                 int opcode = wasmBytes[i] & 0xFF;
 
-                // f32 operations
-                if ((opcode >= 0x38 && opcode <= 0x44) ||
-                    (opcode >= 0x8B && opcode <= 0x94) ||
-                    (opcode >= 0x95 && opcode <= 0x98) ||
-                    opcode == 0xBE) {
+                // f32: 0x43-0x98
+                if (opcode >= 0x43 && opcode <= 0x98) {
                     hasFloatingPoint = true;
                 }
 
-                // f64 operations
-                if ((opcode >= 0x44 && opcode <= 0x4C) ||
-                    (opcode >= 0x99 && opcode <= 0xA6)) {
+                // f64: 0x99-0xBF
+                if (opcode >= 0x99 && opcode <= 0xBF) {
                     hasFloatingPoint = true;
                 }
 
