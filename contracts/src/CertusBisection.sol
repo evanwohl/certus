@@ -92,6 +92,7 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         require(!challenge.resolved, "Challenge already resolved");
 
         challenge.executorStateHash = midpointStateHash;
+        challenge.executorRespondTime = block.timestamp;  // Track response time
         challenge.deadline = block.timestamp + BISECTION_ROUND_TIMEOUT;
     }
 
@@ -132,6 +133,8 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         }
 
         challenge.challengerStateHash = challengerMidpointHash;
+        challenge.executorStateHash = bytes32(0);  // Reset for next round
+        challenge.executorRespondTime = 0;  // Reset executor response tracking
         challenge.round++;
         challenge.deadline = block.timestamp + BISECTION_ROUND_TIMEOUT;
 
@@ -174,10 +177,13 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         if (challenge.jobId == bytes32(0)) return false;
         if (challenge.resolved) return false;
 
-        // Executor must respond first each round, timeout if deadline passed without response
-        return (block.timestamp > challenge.deadline &&
-                challenge.executorStateHash == bytes32(0) &&
-                challenge.round > 0);
+        // Check if executor hasn't responded yet to the current round
+        // executorRespondTime == 0 means executor never responded
+        // executorRespondTime < deadline - BISECTION_ROUND_TIMEOUT means waiting for new response
+        bool waitingForExecutor = challenge.executorRespondTime == 0 ||
+                                  challenge.executorRespondTime < (challenge.deadline - BISECTION_ROUND_TIMEOUT);
+
+        return (block.timestamp > challenge.deadline && waitingForExecutor && challenge.round > 0);
     }
 
     /**

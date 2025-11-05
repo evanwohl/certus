@@ -19,6 +19,14 @@ interface IVRFCoordinator {
         uint32 callbackGasLimit,
         uint32 numWords
     ) external returns (uint256 requestId);
+
+    // Get subscription details for health monitoring
+    function getSubscription(uint64 subId) external view returns (
+        uint96 balance,
+        uint64 reqCount,
+        address owner,
+        address[] memory consumers
+    );
 }
 
 interface IStylusWasmExecutor {
@@ -75,6 +83,7 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     address public immutable vrfCoordinator;
     bytes32 public immutable vrfKeyHash;
     uint64 public immutable vrfSubId;
+    uint256 public constant MIN_LINK_THRESHOLD = 10 * 10**18;  // 10 LINK minimum
     mapping(uint256 => bytes32) public vrfRequestToJobId;
     mapping(bytes32 => uint256) public jobIdToVrfRequest;
     mapping(uint256 => bool) public vrfRequestFulfilled;
@@ -464,9 +473,37 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         emit Unpaused(msg.sender);
     }
 
+    /**
+     * @notice Check VRF health and LINK balance
+     * @return healthy True if VRF subscription has sufficient LINK
+     */
+    function isVRFHealthy() external view returns (bool healthy) {
+        try IVRFCoordinator(vrfCoordinator).getSubscription(vrfSubId) returns (
+            uint96 balance,
+            uint64, // reqCount
+            address, // owner
+            address[] memory // consumers
+        ) {
+            return balance >= MIN_LINK_THRESHOLD;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * @notice Check and emit warning if LINK balance low
+     */
+    function checkVRFHealth() external {
+        (uint96 balance, , , ) = IVRFCoordinator(vrfCoordinator).getSubscription(vrfSubId);
+        if (balance < MIN_LINK_THRESHOLD) {
+            emit VRFLinkLow(balance, MIN_LINK_THRESHOLD);
+        }
+    }
+
     // Events
     event TokenRegistered(address indexed token, uint8 decimals);
     event FallbackVerifierSelection(bytes32 indexed jobId, uint256 blocksSinceReceipt);
+    event VRFLinkLow(uint256 balance, uint256 threshold);
     event Paused(address indexed by);
     event Unpaused(address indexed by);
 }

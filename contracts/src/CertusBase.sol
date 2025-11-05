@@ -77,6 +77,7 @@ contract CertusBase {
         bool resolved;
         uint256 totalSteps;
         bytes32 finalStateRoot;
+        uint256 executorRespondTime;  // Track when executor last responded
     }
 
     // Protocol constants

@@ -40,6 +40,10 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
         _;
     }
 
+    /**
+     * @param _stylusExecutor CRITICAL: Must be audited, immutable contract.
+     *                        Consider CREATE2 deployment for deterministic address.
+     */
     constructor(
         address _jobsModule,
         address _verifierModule,
@@ -63,6 +67,16 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
     ) external whenNotPaused nonReentrant {
         Job memory job = jobsModule.getJob(jobId);
         require(job.status == Status.Receipt, "Not in receipt state");
+
+        // Handle VRF pending case - allow fallback trigger after grace period
+        if (job.selectedVerifiers[0] == address(0)) {
+            require(
+                block.timestamp > jobsModule.vrfRequestTime(jobId) + VRF_RETRY_GRACE_PERIOD,
+                "VRF pending - call fallbackVerifierSelection first"
+            );
+            revert("No verifiers selected");
+        }
+
         require(_isSelectedVerifier(jobId, msg.sender), "Not selected verifier");
         require(sha256(wasm) == job.wasmHash, "Wasm hash mismatch");
         require(sha256(input) == job.inputHash, "Input hash mismatch");
@@ -228,7 +242,16 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
     }
 
     /**
-     * Execute WASM on-chain
+     * Execute WASM on-chain via Stylus executor
+     *
+     * @dev CRITICAL TRUST ASSUMPTION: The stylusExecutor contract must be:
+     * 1. Immutable - deployed with CREATE2 for deterministic address
+     * 2. Audited - thoroughly reviewed for correctness
+     * 3. Non-upgradeable - or governed by timelock if upgradeable
+     *
+     * A malicious or buggy Stylus executor could selectively fail to hide fraud.
+     * This trust boundary cannot be eliminated at the contract level.
+     * Deploy with extreme caution and consider formal verification.
      */
     function _executeWasmOnChain(
         bytes calldata wasm,
