@@ -139,6 +139,13 @@ contract CertusVerifier is CertusBase, ReentrancyGuard {
     }
 
     /**
+     * Get verifier's stake token address
+     */
+    function getVerifierStakeToken(address verifier) external view returns (address) {
+        return verifiers[verifier].stakeToken;
+    }
+
+    /**
      * Slash verifier for non-response
      */
     function slashVerifier(
@@ -184,8 +191,28 @@ contract CertusVerifier is CertusBase, ReentrancyGuard {
             }
         }
 
+        // Check region concentration after removal
+        _checkRegionConcentration();
+
         IERC20(stakeToken).safeTransfer(msg.sender, refundAmount);
         emit VerifierUnregistered(msg.sender, refundAmount);
+    }
+
+    /**
+     * Internal function to verify region concentration limits
+     */
+    function _checkRegionConcentration() internal view {
+        if (verifierList.length == 0) return;
+
+        for (uint8 region = 0; region < 10; region++) {
+            uint256 regionCount = verifierCountByRegion[region];
+            if (regionCount > 0) {
+                require(
+                    regionCount <= (verifierList.length * MAX_REGION_CONCENTRATION) / 100,
+                    "Region concentration exceeded after removal"
+                );
+            }
+        }
     }
 
     /**

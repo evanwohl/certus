@@ -16,6 +16,9 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
     // Bisection state
     mapping(bytes32 => BisectionChallenge) public challenges;
 
+    // Anti-grief: exponential stake escalation per round
+    mapping(bytes32 => uint256) public roundStakeMultiplier;
+
     // Reference to main escrow contract
     address public immutable escrowContract;
 
@@ -98,7 +101,8 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
     function challengerPick(
         bytes32 jobId,
         bool disputeFirstHalf,
-        bytes32 challengerMidpointHash
+        bytes32 challengerMidpointHash,
+        address payToken
     ) external nonReentrant {
         BisectionChallenge storage challenge = challenges[jobId];
         require(challenge.jobId == jobId, "No active challenge");
@@ -106,6 +110,14 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         require(block.timestamp <= challenge.deadline, "Round deadline passed");
         require(!challenge.resolved, "Challenge already resolved");
         require(challenge.executorStateHash != bytes32(0), "Executor must respond first");
+        require(challenge.round < MAX_BISECTION_ROUNDS, "Max rounds exceeded");
+
+        // Anti-grief: require exponential stake for each round
+        uint256 requiredStake = challenge.challengeStake * (2 ** (challenge.round - 1));
+        if (challenge.round > 5) {
+            IERC20(payToken).safeTransferFrom(msg.sender, address(this), requiredStake);
+            roundStakeMultiplier[jobId] += requiredStake;
+        }
 
         uint256 mid = (challenge.disputedStart + challenge.disputedEnd) / 2;
 
@@ -159,6 +171,20 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         if (challenge.jobId == bytes32(0)) return false;
         if (challenge.resolved) return false;
         return block.timestamp > challenge.deadline;
+    }
+
+    /**
+     * @notice Check if executor timed out during bisection
+     */
+    function isExecutorTimedOut(bytes32 jobId) external view returns (bool) {
+        BisectionChallenge memory challenge = challenges[jobId];
+        if (challenge.jobId == bytes32(0)) return false;
+        if (challenge.resolved) return false;
+
+        // Executor must respond first each round, timeout if deadline passed without response
+        return (block.timestamp > challenge.deadline &&
+                challenge.executorStateHash == bytes32(0) &&
+                challenge.round > 0);
     }
 
     /**

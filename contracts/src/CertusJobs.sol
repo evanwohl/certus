@@ -54,6 +54,7 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     // Token support
     mapping(address => bool) public supportedTokens;
     mapping(address => uint8) public tokenDecimals;
+    mapping(address => uint256) public minStakeInTokenUnits; // per-token stake requirement
 
     // Accounting isolation
     mapping(address => uint256) public totalEscrowedFunds;
@@ -77,6 +78,7 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     mapping(uint256 => bytes32) public vrfRequestToJobId;
     mapping(bytes32 => uint256) public jobIdToVrfRequest;
     mapping(uint256 => bool) public vrfRequestFulfilled;
+    mapping(bytes32 => uint256) public vrfRequestTime;
 
     // Emergency pause
     bool public paused;
@@ -126,6 +128,8 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         require(supportedTokens[payToken], "Token not supported");
         require(payAmt > 0, "Payment must be positive");
         require(challengeWindow >= 3600, "Challenge window too short");
+        require(maxOutputSize > 0 && maxOutputSize <= 1024 * 1024, "Invalid output size");
+        require(clientGriefCount[msg.sender] < MAX_GRIEF_COUNT, "Client banned");
 
         // Calculate client deposit
         uint8 decimals = tokenDecimals[payToken];
@@ -208,17 +212,19 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         bytes32 jobId,
         bytes32 outputHash,
         bytes calldata execSig,
-        uint64 challengeWindow
+        uint32 outputSize
     ) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.status == Status.Accepted, "Job not accepted");
         require(msg.sender == job.executor, "Only executor can submit");
+        require(outputSize <= job.maxOutputSize, "Output exceeds max size");
 
         job.outputHash = outputHash;
         job.status = Status.Receipt;
-        job.finalizeDeadline = uint64(block.timestamp) + challengeWindow;
+        job.finalizeDeadline = uint64(block.timestamp) + 3600; // 1h fixed challenge window
         receiptTimestamp[jobId] = block.timestamp;
         receiptBlockNumber[jobId] = block.number;
+        vrfRequestTime[jobId] = block.timestamp;
 
         // Request VRF for verifier selection
         uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
@@ -252,6 +258,38 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         job.backupVerifiers = backup;
         vrfRequestFulfilled[requestId] = true;
 
+        emit VerifiersSelected(jobId, selected, backup);
+    }
+
+    /**
+     * Fallback verifier selection when VRF fails
+     */
+    function fallbackVerifierSelection(bytes32 jobId) external nonReentrant {
+        Job storage job = jobs[jobId];
+        require(job.status == Status.Receipt, "Not in receipt state");
+        require(block.timestamp > vrfRequestTime[jobId] + VRF_RETRY_GRACE_PERIOD, "VRF grace period not passed");
+
+        uint256 requestId = jobIdToVrfRequest[jobId];
+        require(!vrfRequestFulfilled[requestId], "VRF already fulfilled");
+
+        // Use blockhash as fallback randomness
+        uint256 blocksSince = block.number - receiptBlockNumber[jobId];
+        require(blocksSince < VRF_FALLBACK_BLOCKS, "Too many blocks passed");
+
+        uint256 seed = uint256(keccak256(abi.encodePacked(
+            blockhash(receiptBlockNumber[jobId] + 1),
+            jobId,
+            block.timestamp
+        )));
+
+        (address[3] memory selected, address[3] memory backup) =
+            verifierContract.selectVerifiersWithVRF(jobId, job.payToken, seed, seed >> 128);
+
+        job.selectedVerifiers = selected;
+        job.backupVerifiers = backup;
+        vrfRequestFulfilled[requestId] = true;
+
+        emit FallbackVerifierSelection(jobId, blocksSince);
         emit VerifiersSelected(jobId, selected, backup);
     }
 
@@ -331,6 +369,23 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     }
 
     /**
+     * Register supported token with decimal-aware minimum stakes
+     */
+    function registerToken(address token) external onlyOwner {
+        require(!supportedTokens[token], "Already supported");
+        require(token != address(0), "Invalid token");
+
+        uint8 decimals = IERC20Metadata(token).decimals();
+        tokenDecimals[token] = decimals;
+        supportedTokens[token] = true;
+
+        // Set min stake based on decimals (targeting $1000 USD equivalent)
+        minStakeInTokenUnits[token] = 1000 * (10 ** decimals);
+
+        emit TokenRegistered(token, decimals);
+    }
+
+    /**
      * Set escrow contract address (one-time)
      */
     function setEscrowContract(address _escrowContract) external onlyOwner {
@@ -348,6 +403,19 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         require(job.status == Status.Receipt, "Invalid status");
         job.status = Status.Slashed;
         totalJobsSlashed++;
+
+        // Update executor reputation
+        ExecutorReputation storage rep = executorReputation[job.executor];
+        rep.fraudAttempts++;
+        rep.lastFraudTimestamp = block.timestamp;
+
+        if (rep.fraudAttempts == 1) {
+            rep.banUntil = block.timestamp + EXECUTOR_BAN_DURATION;
+            emit ExecutorBanned(job.executor, rep.banUntil, false);
+        } else if (rep.fraudAttempts > MAX_FRAUD_ATTEMPTS) {
+            rep.permanentlyBanned = true;
+            emit ExecutorBanned(job.executor, 0, true);
+        }
 
         // Update accounting
         totalEscrowedFunds[job.payToken] -= (job.payAmt + job.executorDeposit + job.clientDeposit);
@@ -392,6 +460,8 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     }
 
     // Events
+    event TokenRegistered(address indexed token, uint8 decimals);
+    event FallbackVerifierSelection(bytes32 indexed jobId, uint256 blocksSinceReceipt);
     event Paused(address indexed by);
     event Unpaused(address indexed by);
 }
