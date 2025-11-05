@@ -111,10 +111,13 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         require(!challenge.resolved, "Challenge already resolved");
         require(challenge.executorStateHash != bytes32(0), "Executor must respond first");
         require(challenge.round < MAX_BISECTION_ROUNDS, "Max rounds exceeded");
-
-        // Anti-grief: require exponential stake for each round
-        uint256 requiredStake = challenge.challengeStake * (2 ** (challenge.round - 1));
+        // Anti-grief: require exponential stake for each round (capped)
         if (challenge.round > 5) {
+            uint256 multiplier = 2 ** (challenge.round - 5); // starts at 2^1 for round 6
+            if (multiplier > MAX_STAKE_MULTIPLIER) {
+                multiplier = MAX_STAKE_MULTIPLIER;
+            }
+            uint256 requiredStake = challenge.challengeStake * multiplier;
             IERC20(payToken).safeTransferFrom(msg.sender, address(this), requiredStake);
             roundStakeMultiplier[jobId] += requiredStake;
         }
@@ -161,16 +164,6 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
 
         emit BisectionResolved(jobId, fraud);
         return fraud;
-    }
-
-    /**
-     * @notice Check if executor failed to respond in time
-     */
-    function isExecutorTimedOut(bytes32 jobId) external view returns (bool) {
-        BisectionChallenge storage challenge = challenges[jobId];
-        if (challenge.jobId == bytes32(0)) return false;
-        if (challenge.resolved) return false;
-        return block.timestamp > challenge.deadline;
     }
 
     /**

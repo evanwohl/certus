@@ -142,13 +142,11 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
         Job memory job = jobsModule.getJob(jobId);
         require(job.status == Status.Receipt, "Not in receipt state");
         require(_isSelectedVerifier(jobId, verifier), "Not selected verifier");
-
         uint256 timeSinceReceipt = block.timestamp - jobsModule.receiptTimestamp(jobId);
         require(timeSinceReceipt > VERIFIER_RESPONSE_DEADLINE, "Deadline not passed");
-
-        // Get verifier's stake token to calculate penalty with correct decimals
-        address stakeToken = verifierModule.getVerifierStakeToken(verifier);
-        uint256 penalty = jobsModule.minStakeInTokenUnits(stakeToken) / 2; // 50% of min stake
+        // Slash 50% of verifier's actual stake (not min stake)
+        uint256 actualStake = verifierModule.getVerifierStakeAmount(verifier);
+        uint256 penalty = actualStake / 2; // 50% of actual stake
         verifierModule.slashVerifier(verifier, msg.sender, penalty);
 
         emit VerifierSlashed(jobId, verifier, msg.sender, penalty);

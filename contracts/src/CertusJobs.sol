@@ -130,6 +130,8 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         require(challengeWindow >= 3600, "Challenge window too short");
         require(maxOutputSize > 0 && maxOutputSize <= 1024 * 1024, "Invalid output size");
         require(clientGriefCount[msg.sender] < MAX_GRIEF_COUNT, "Client banned");
+        require(fuelLimit > 0 && fuelLimit <= MAX_FUEL_LIMIT, "Invalid fuel limit");
+        require(memLimit > 0 && memLimit <= MAX_MEM_LIMIT, "Invalid memory limit");
 
         // Calculate client deposit
         uint8 decimals = tokenDecimals[payToken];
@@ -301,6 +303,9 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
         require(job.status == Status.Receipt, "Not in receipt state");
         require(msg.sender == job.client, "Only client can finalize");
         require(block.timestamp <= job.finalizeDeadline, "Deadline passed");
+
+        // Update executor reputation on success
+        executorReputation[job.executor].jobsCompleted++;
 
         // Calculate fee
         uint256 protocolFee = calculateProtocolFee(job.payAmt, job.payToken);

@@ -146,6 +146,13 @@ contract CertusVerifier is CertusBase, ReentrancyGuard {
     }
 
     /**
+     * Get verifier's stake amount
+     */
+    function getVerifierStakeAmount(address verifier) external view returns (uint256) {
+        return verifiers[verifier].amount;
+    }
+
+    /**
      * Slash verifier for non-response
      */
     function slashVerifier(

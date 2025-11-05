@@ -84,6 +84,7 @@ contract CertusBase {
     uint256 public constant CHALLENGE_STAKE = 100 * 10**6; // $100 stake required
     uint256 public constant MAX_BISECTION_ROUNDS = 20;
     uint256 public constant BISECTION_ROUND_TIMEOUT = 300; // 5 minutes
+    uint256 public constant MAX_STAKE_MULTIPLIER = 1000; // max 1000x base stake
     uint256 public constant MAX_GRIEF_COUNT = 3;
     uint256 public constant MAX_INPUT_ON_CHAIN = 100 * 1024; // 100KB
     uint256 public constant VERIFIER_RESPONSE_DEADLINE = 30 minutes;
@@ -99,6 +100,8 @@ contract CertusBase {
     uint256 public constant MAX_WASM_SIZE = 24 * 1024; // 24KB
     uint256 public constant VRF_RETRY_GRACE_PERIOD = 30 minutes;
     uint256 public constant EXECUTOR_COLLATERAL_MULTIPLIER = 200; // 2.0x fixed
+    uint64 public constant MAX_FUEL_LIMIT = 10_000_000; // 10M gas units max
+    uint64 public constant MAX_MEM_LIMIT = 128 * 1024 * 1024; // 128MB max
 
     // Fee tier thresholds
     uint256 public constant TIER1_MAX = 10; // $10
