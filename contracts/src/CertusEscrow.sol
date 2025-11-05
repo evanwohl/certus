@@ -69,8 +69,15 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
 
         // Execute on-chain
         bytes memory recomputedOutput = _executeWasmOnChain(wasm, input, job.fuelLimit, job.memLimit);
-        bytes32 recomputedHash = sha256(recomputedOutput);
 
+        // Check for abort sentinel
+        if (keccak256(recomputedOutput) == keccak256("STYLUS_ERROR")) {
+            // execution failed - job invalid, refund client
+            _handleAbort(jobId, job);
+            return;
+        }
+
+        bytes32 recomputedHash = sha256(recomputedOutput);
         if (recomputedHash != job.outputHash) {
             // Fraud detected
             _handleFraud(jobId, job, msg.sender);
@@ -124,11 +131,13 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
 
         if (fraud) {
             _handleFraud(jobId, job, challenge.challenger);
-            // Return challenge stake
+            // Return challenge stake + refund bonds
             IERC20(job.payToken).safeTransfer(challenge.challenger, challenge.challengeStake);
+            bisectionModule.refundBonds(jobId, true, job.payToken);
         } else {
-            // No fraud - executor gets challenge stake
+            // No fraud - executor gets challenge stake + bonds
             IERC20(job.payToken).safeTransfer(job.executor, challenge.challengeStake);
+            bisectionModule.refundBonds(jobId, false, job.payToken);
         }
     }
 
@@ -182,11 +191,14 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
         // Update state in jobs module
         jobsModule.markSlashed(jobId);
 
-        // Transfers
-        if (verifier != address(0)) {
+        // Transfers - prevent self-payment
+        if (verifier != address(0) && verifier != job.executor) {
             IERC20(job.payToken).safeTransfer(verifier, verifierBounty);
+            IERC20(job.payToken).safeTransfer(job.client, clientRefund + job.clientDeposit);
+        } else {
+            // no bounty if executor self-challenges
+            IERC20(job.payToken).safeTransfer(job.client, totalSlashed + job.clientDeposit);
         }
-        IERC20(job.payToken).safeTransfer(job.client, clientRefund + job.clientDeposit);
 
         emit FraudDetected(jobId, job.executor, verifier, totalSlashed);
     }
@@ -246,6 +258,23 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
     }
 
     /**
+     * Handle aborted execution
+     */
+    function _handleAbort(bytes32 jobId, Job memory job) internal {
+        // refund client, slash executor for invalid job
+        jobsModule.markSlashed(jobId);
+
+        // partial slash - 50% for abort vs 100% for fraud
+        uint256 executorPenalty = job.executorDeposit / 2;
+        uint256 clientRefund = job.payAmt + job.clientDeposit + executorPenalty;
+
+        IERC20(job.payToken).safeTransfer(job.client, clientRefund);
+        IERC20(job.payToken).safeTransfer(job.executor, job.executorDeposit - executorPenalty);
+
+        emit JobAborted(jobId, job.executor, executorPenalty);
+    }
+
+    /**
      * Emergency pause
      */
     function pause() external onlyOwner whenNotPaused {
@@ -262,6 +291,7 @@ contract CertusEscrow is CertusBase, ReentrancyGuard, Ownable {
     }
 
     // Events
+    event JobAborted(bytes32 indexed jobId, address indexed executor, uint256 penalty);
     event Paused(address indexed by);
     event Unpaused(address indexed by);
 }

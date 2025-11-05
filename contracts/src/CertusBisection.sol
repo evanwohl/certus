@@ -17,7 +17,7 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
     mapping(bytes32 => BisectionChallenge) public challenges;
 
     // Anti-grief: exponential stake escalation per round
-    mapping(bytes32 => uint256) public roundStakeMultiplier;
+    mapping(bytes32 => uint256) public challengerBonds; // total bonds posted
 
     // Reference to main escrow contract
     address public immutable escrowContract;
@@ -119,7 +119,7 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
             }
             uint256 requiredStake = challenge.challengeStake * multiplier;
             IERC20(payToken).safeTransferFrom(msg.sender, address(this), requiredStake);
-            roundStakeMultiplier[jobId] += requiredStake;
+            challengerBonds[jobId] += requiredStake;
         }
 
         uint256 mid = (challenge.disputedStart + challenge.disputedEnd) / 2;
@@ -178,6 +178,25 @@ contract CertusBisection is CertusBase, ReentrancyGuard {
         return (block.timestamp > challenge.deadline &&
                 challenge.executorStateHash == bytes32(0) &&
                 challenge.round > 0);
+    }
+
+    /**
+     * @notice Refund challenger bonds based on outcome
+     */
+    function refundBonds(bytes32 jobId, bool fraudProven, address payToken) external onlyEscrow {
+        uint256 bonds = challengerBonds[jobId];
+        if (bonds == 0) return;
+
+        BisectionChallenge memory challenge = challenges[jobId];
+        challengerBonds[jobId] = 0;
+
+        if (fraudProven) {
+            // challenger wins - full refund
+            IERC20(payToken).safeTransfer(challenge.challenger, bonds);
+        } else {
+            // executor wins - gets bonds
+            IERC20(payToken).safeTransfer(challenge.executor, bonds);
+        }
     }
 
     /**

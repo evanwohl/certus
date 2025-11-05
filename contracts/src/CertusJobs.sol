@@ -402,7 +402,7 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     /**
      * Mark job as slashed (only callable by escrow)
      */
-    function markSlashed(bytes32 jobId) external {
+    function markSlashed(bytes32 jobId) external nonReentrant {
         require(msg.sender == escrowContract, "Only escrow");
         Job storage job = jobs[jobId];
         require(job.status == Status.Receipt, "Invalid status");
@@ -429,7 +429,7 @@ contract CertusJobs is CertusBase, ReentrancyGuard, Ownable {
     /**
      * Mark job as finalized (only callable by escrow)
      */
-    function markFinalized(bytes32 jobId) external {
+    function markFinalized(bytes32 jobId) external nonReentrant {
         require(msg.sender == escrowContract, "Only escrow");
         Job storage job = jobs[jobId];
         require(job.status == Status.Receipt, "Invalid status");

@@ -17,6 +17,8 @@ contract CertusVerifier is CertusBase, ReentrancyGuard {
     mapping(address => VerifierStake) public verifiers;
     address[] public verifierList;
     mapping(uint8 => uint256) public verifierCountByRegion;
+    uint8 public maxConcentrationRegion; // track highest concentration
+    uint256 public maxConcentrationPercent;
 
     // VRF integration
     address public immutable vrfCoordinator;
@@ -101,6 +103,12 @@ contract CertusVerifier is CertusBase, ReentrancyGuard {
         verifierList.push(msg.sender);
         verifierCountByRegion[region]++;
 
+        // update max concentration
+        uint256 regionPercent = (newRegionCount * 100) / newTotalCount;
+        if (regionPercent > maxConcentrationPercent) {
+            maxConcentrationPercent = regionPercent;
+            maxConcentrationRegion = region;
+        }
         emit VerifierRegistered(msg.sender, amount, storageCapacityGB);
     }
 
@@ -208,20 +216,30 @@ contract CertusVerifier is CertusBase, ReentrancyGuard {
     /**
      * Internal function to verify region concentration limits
      */
-    function _checkRegionConcentration() internal view {
+    function _checkRegionConcentration() internal {
         if (verifierList.length == 0) return;
+        // only check the previously max region
+        uint256 regionCount = verifierCountByRegion[maxConcentrationRegion];
+        if (regionCount > 0) {
+            uint256 newPercent = (regionCount * 100) / verifierList.length;
+            require(newPercent <= MAX_REGION_CONCENTRATION, "Region concentration exceeded");
 
-        for (uint8 region = 0; region < 10; region++) {
-            uint256 regionCount = verifierCountByRegion[region];
-            if (regionCount > 0) {
-                require(
-                    regionCount <= (verifierList.length * MAX_REGION_CONCENTRATION) / 100,
-                    "Region concentration exceeded after removal"
-                );
+            // recalc max if needed
+            if (newPercent < maxConcentrationPercent) {
+                maxConcentrationPercent = 0;
+                for (uint8 r = 0; r < 10; r++) {
+                    uint256 rCount = verifierCountByRegion[r];
+                    if (rCount > 0) {
+                        uint256 rPercent = (rCount * 100) / verifierList.length;
+                        if (rPercent > maxConcentrationPercent) {
+                            maxConcentrationPercent = rPercent;
+                            maxConcentrationRegion = r;
+                        }
+                    }
+                }
             }
         }
     }
-
     /**
      * Select 3 primary verifiers
      */
