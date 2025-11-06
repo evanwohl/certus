@@ -571,33 +571,47 @@ contract CertusToken is ERC20, Ownable, ReentrancyGuard {
     }
 
     /**
-     * Calculate verifier subsidy based on protocol revenue
+     * Calculate verifier subsidy with bootstrap phase
      */
     function calculateDynamicSubsidy() public view returns (uint256) {
         if (activeVerifierCount == 0) return 0;
 
-        // Minimum protocol revenue threshold: $10k/month
-        uint256 MIN_PROTOCOL_REVENUE = 10_000 * 10**6;
-        if (totalMonthlyFees < MIN_PROTOCOL_REVENUE) {
-            return 0;
+        uint256 monthsElapsed = (block.timestamp - deployTime) / 30 days;
+
+        // Bootstrap phase (months 0-6): Guarantee minimum income
+        if (monthsElapsed < 6) {
+            uint256 BOOTSTRAP_TARGET = 100 * 10**6; // $100/month during bootstrap
+            uint256 feeIncomePerVerifier = totalMonthlyFees / activeVerifierCount;
+            uint256 monthlyEmission = getMonthlyEmission();
+            uint256 certusPerVerifier = monthlyEmission / activeVerifierCount;
+
+            // Assume CERTUS at $0.01 during bootstrap
+            uint256 certusValueUSD = (certusPerVerifier / 10**18) * 10**4; // Convert to 6 decimals
+
+            uint256 currentIncome = feeIncomePerVerifier + certusValueUSD;
+            if (currentIncome >= BOOTSTRAP_TARGET) return 0;
+
+            // During bootstrap, subsidize up to target
+            return BOOTSTRAP_TARGET - currentIncome;
         }
 
-        uint256 feeIncomePerVerifier = totalMonthlyFees / activeVerifierCount;
+        // Growth phase (months 7-24): Declining subsidies
+        if (monthsElapsed < 24) {
+            uint256 TARGET_INCOME = 50 * 10**6; // $50/month minimum
+            uint256 feeIncomePerVerifier = totalMonthlyFees / activeVerifierCount;
 
-        uint256 monthlyEmission = getMonthlyEmission();
-        uint256 certusPerVerifier = monthlyEmission / activeVerifierCount;
+            if (feeIncomePerVerifier >= TARGET_INCOME) return 0;
 
-        // Minimum income target: $50/month
-        uint256 MIN_VIABLE_INCOME = 50 * 10**6;
-        if (feeIncomePerVerifier >= MIN_VIABLE_INCOME) {
-            return 0;
+            // Subsidy declines over time to push toward sustainability
+            uint256 maxSubsidyPercent = 100 - (monthsElapsed - 6) * 5; // 100% -> 10% over 18 months
+            uint256 neededSubsidy = TARGET_INCOME - feeIncomePerVerifier;
+            uint256 maxSubsidy = (TARGET_INCOME * maxSubsidyPercent) / 100;
+
+            return neededSubsidy > maxSubsidy ? maxSubsidy : neededSubsidy;
         }
 
-        // Cap at 10% of revenue
-        uint256 maxSubsidy = totalMonthlyFees / 10;
-        uint256 neededSubsidy = MIN_VIABLE_INCOME - feeIncomePerVerifier;
-
-        return neededSubsidy > maxSubsidy ? maxSubsidy : neededSubsidy;
+        // Mature phase (24+ months): Market-driven only
+        return 0;
     }
 
     /**
