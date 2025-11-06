@@ -3,6 +3,7 @@ members = [
     "node/executor",
     "node/verifier",
     "node/common",
+    "python-verifier",
 ]
 resolver = "2"
 
