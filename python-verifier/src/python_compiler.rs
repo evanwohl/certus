@@ -1,37 +1,42 @@
 use anyhow::{Result, bail};
 use wasm_encoder::*;
 use std::collections::{HashMap, BTreeMap};
+use std::sync::Arc;
 use sha2::{Sha256, Digest};
 use rustpython_parser::{self as parser, ast};
 
-/// Production Python to deterministic Wasm compiler
+const MAX_LOCALS: usize = 256;
+const MAX_PYTHON_SIZE: usize = 100 * 1024;
+
 pub struct PythonCompiler {
-    cache: HashMap<String, Vec<u8>>,
+    cache: HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl PythonCompiler {
     pub fn new() -> Self {
         Self {
-            cache: HashMap::new(),
+            cache: HashMap::with_capacity(64),
         }
     }
 
-    /// Compile Python to deterministic Wasm
     pub fn compile(&mut self, python_code: &str) -> Result<Vec<u8>> {
+        if python_code.len() > MAX_PYTHON_SIZE {
+            bail!("Python code exceeds 100KB limit");
+        }
+
         let mut hasher = Sha256::new();
         hasher.update(python_code.as_bytes());
         let code_hash = hex::encode(hasher.finalize());
 
         if let Some(cached) = self.cache.get(&code_hash) {
-            return Ok(cached.clone());
+            return Ok((**cached).clone());
         }
 
-        // Python AST → IR → Wasm (3-stage compilation)
         let py_ast = self.parse_python(python_code)?;
         let ir = self.lower_to_ir(&py_ast)?;
         let wasm = self.codegen_wasm(&ir)?;
 
-        self.cache.insert(code_hash, wasm.clone());
+        self.cache.insert(code_hash, Arc::new(wasm.clone()));
         Ok(wasm)
     }
 
@@ -51,7 +56,7 @@ impl PythonCompiler {
     }
 }
 
-/// Intermediate Representation (deterministic, easier to compile)
+// Intermediate representation for deterministic compilation
 #[derive(Debug, Clone)]
 pub enum IR {
     Module {
@@ -65,6 +70,8 @@ pub struct IRFunction {
     pub name: String,
     pub _params: Vec<String>,
     pub locals: Vec<String>,
+    pub local_map: HashMap<String, u32>,
+    pub temp_locals: u32,
     pub body: Vec<IRStmt>,
 }
 
@@ -94,9 +101,9 @@ pub enum BinOp {
     Eq, Ne, Lt, Le, Gt, Ge,
 }
 
-/// Lower Python AST to IR
+// Lowers Python AST to intermediate representation
 struct IRLowering {
-    current_locals: BTreeMap<String, usize>, // BTreeMap for deterministic ordering
+    current_locals: BTreeMap<String, usize>,
 }
 
 impl IRLowering {
@@ -127,12 +134,24 @@ impl IRLowering {
             }
         }
 
-        // Create implicit main function
         let main_locals: Vec<String> = self.current_locals.keys().cloned().collect();
+        let local_map: HashMap<String, u32> = main_locals.iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i as u32))
+            .collect();
+
+        let temp_count = self.count_temps(&main_body);
+
+        if main_locals.len() + temp_count > MAX_LOCALS {
+            bail!("Too many locals: {} + {} temps exceeds limit", main_locals.len(), temp_count);
+        }
+
         functions.insert(0, IRFunction {
             name: "main".to_string(),
             _params: vec![],
             locals: main_locals,
+            local_map,
+            temp_locals: temp_count as u32,
             body: main_body,
         });
 
@@ -182,6 +201,25 @@ impl IRLowering {
         Ok(())
     }
 
+    fn count_temps(&self, stmts: &[IRStmt]) -> usize {
+        let mut max_temps = 0;
+        for stmt in stmts {
+            max_temps = max_temps.max(self.count_stmt_temps(stmt));
+        }
+        max_temps
+    }
+
+    fn count_stmt_temps(&self, stmt: &IRStmt) -> usize {
+        match stmt {
+            IRStmt::For { body, .. } => 1 + self.count_temps(body),
+            IRStmt::If { then_block, else_block, .. } => {
+                self.count_temps(then_block).max(self.count_temps(else_block))
+            }
+            IRStmt::While { body, .. } => self.count_temps(body),
+            _ => 0,
+        }
+    }
+
     fn lower_function(&mut self, func: &ast::StmtFunctionDef) -> Result<IRFunction> {
         let mut params = Vec::new();
         for arg in &func.args.args {
@@ -197,12 +235,25 @@ impl IRLowering {
         }
 
         let locals: Vec<String> = self.current_locals.keys().cloned().collect();
+        let local_map: HashMap<String, u32> = locals.iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i as u32))
+            .collect();
+
+        let temp_count = self.count_temps(&body);
+
+        if locals.len() + temp_count > MAX_LOCALS {
+            bail!("Function '{}' has too many locals: {} + {} temps", func.name, locals.len(), temp_count);
+        }
+
         self.current_locals = saved_locals;
 
         Ok(IRFunction {
             name: func.name.to_string(),
             _params: params,
             locals,
+            local_map,
+            temp_locals: temp_count as u32,
             body,
         })
     }
@@ -351,22 +402,23 @@ impl IRLowering {
     }
 }
 
-/// Wasm code generation from IR
+// Generates WebAssembly bytecode from IR
 struct WasmCodegen {
     function_indices: BTreeMap<String, u32>,
+    heap_offset_global: u32,
 }
 
 impl WasmCodegen {
     fn new() -> Self {
         Self {
             function_indices: BTreeMap::new(),
+            heap_offset_global: 1,
         }
     }
 
     fn generate(&mut self, ir: &IR) -> Result<Vec<u8>> {
         let IR::Module { functions, .. } = ir;
 
-        // Register functions (deterministic ordering from IR)
         for (idx, func) in functions.iter().enumerate() {
             self.function_indices.insert(func.name.clone(), idx as u32);
         }
@@ -395,7 +447,7 @@ impl WasmCodegen {
         });
         module.section(&memory);
 
-        // Global section (gas counter)
+        // Global section: gas counter and heap pointer
         let mut globals = GlobalSection::new();
         globals.global(
             GlobalType {
@@ -403,6 +455,13 @@ impl WasmCodegen {
                 mutable: true,
             },
             &ConstExpr::i32_const(0),
+        );
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+            },
+            &ConstExpr::i32_const(0x10000),
         );
         module.section(&globals);
 
@@ -424,48 +483,46 @@ impl WasmCodegen {
     }
 
     fn generate_function(&mut self, func: &IRFunction) -> Result<Function> {
-        let num_locals = func.locals.len() as u32;
-        let mut wasm_func = Function::new(vec![(num_locals, ValType::I32)]);
+        let total_locals = func.locals.len() as u32 + func.temp_locals;
+        let mut wasm_func = Function::new(vec![(total_locals, ValType::I32)]);
 
-        // Gas metering
         wasm_func.instruction(&Instruction::GlobalGet(0));
         wasm_func.instruction(&Instruction::I32Const(100));
         wasm_func.instruction(&Instruction::I32Add);
         wasm_func.instruction(&Instruction::GlobalSet(0));
 
-        // Generate body
         for stmt in &func.body {
-            self.generate_stmt(&mut wasm_func, stmt, &func.locals)?;
+            self.generate_stmt(&mut wasm_func, stmt, func)?;
         }
 
-        // Default return
         wasm_func.instruction(&Instruction::I32Const(0));
         wasm_func.instruction(&Instruction::End);
 
         Ok(wasm_func)
     }
 
-    fn generate_stmt(&mut self, func: &mut Function, stmt: &IRStmt, locals: &[String]) -> Result<()> {
+    fn generate_stmt(&mut self, func: &mut Function, stmt: &IRStmt, ir_func: &IRFunction) -> Result<()> {
         match stmt {
             IRStmt::Assign { var, value } => {
-                self.generate_expr(func, value, locals)?;
-                let local_idx = self.get_local_index(var, locals)?;
-                func.instruction(&Instruction::LocalSet(local_idx));
+                self.generate_expr(func, value, ir_func)?;
+                let local_idx = ir_func.local_map.get(var)
+                    .ok_or_else(|| anyhow::anyhow!("Variable '{}' not in local_map", var))?;
+                func.instruction(&Instruction::LocalSet(*local_idx));
             }
             IRStmt::Return(expr) => {
-                self.generate_expr(func, expr, locals)?;
+                self.generate_expr(func, expr, ir_func)?;
                 func.instruction(&Instruction::Return);
             }
             IRStmt::If { cond, then_block, else_block } => {
-                self.generate_expr(func, cond, locals)?;
+                self.generate_expr(func, cond, ir_func)?;
                 func.instruction(&Instruction::If(BlockType::Empty));
                 for s in then_block {
-                    self.generate_stmt(func, s, locals)?;
+                    self.generate_stmt(func, s, ir_func)?;
                 }
                 if !else_block.is_empty() {
                     func.instruction(&Instruction::Else);
                     for s in else_block {
-                        self.generate_stmt(func, s, locals)?;
+                        self.generate_stmt(func, s, ir_func)?;
                     }
                 }
                 func.instruction(&Instruction::End);
@@ -473,20 +530,20 @@ impl WasmCodegen {
             IRStmt::While { cond, body } => {
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 func.instruction(&Instruction::Loop(BlockType::Empty));
-                self.generate_expr(func, cond, locals)?;
+                self.generate_expr(func, cond, ir_func)?;
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));
                 for s in body {
-                    self.generate_stmt(func, s, locals)?;
+                    self.generate_stmt(func, s, ir_func)?;
                 }
                 func.instruction(&Instruction::Br(0));
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::End);
             }
             IRStmt::For { var, iter, body } => {
-                // For loop over range/list (simplified)
-                let loop_var = self.get_local_index(var, locals)?;
-                let counter = locals.len() as u32;
+                let loop_var = ir_func.local_map.get(var)
+                    .ok_or_else(|| anyhow::anyhow!("Loop variable '{}' not in local_map", var))?;
+                let counter = ir_func.locals.len() as u32;
 
                 func.instruction(&Instruction::I32Const(0));
                 func.instruction(&Instruction::LocalSet(counter));
@@ -494,20 +551,17 @@ impl WasmCodegen {
                 func.instruction(&Instruction::Block(BlockType::Empty));
                 func.instruction(&Instruction::Loop(BlockType::Empty));
 
-                // Load counter, compare with iter length
                 func.instruction(&Instruction::LocalGet(counter));
-                self.generate_expr(func, iter, locals)?;
+                self.generate_expr(func, iter, ir_func)?;
                 func.instruction(&Instruction::I32GeU);
                 func.instruction(&Instruction::BrIf(1));
 
-                // Loop body
                 func.instruction(&Instruction::LocalGet(counter));
-                func.instruction(&Instruction::LocalSet(loop_var));
+                func.instruction(&Instruction::LocalSet(*loop_var));
                 for s in body {
-                    self.generate_stmt(func, s, locals)?;
+                    self.generate_stmt(func, s, ir_func)?;
                 }
 
-                // Increment counter
                 func.instruction(&Instruction::LocalGet(counter));
                 func.instruction(&Instruction::I32Const(1));
                 func.instruction(&Instruction::I32Add);
@@ -518,43 +572,63 @@ impl WasmCodegen {
                 func.instruction(&Instruction::End);
             }
             IRStmt::Expr(expr) => {
-                self.generate_expr(func, expr, locals)?;
+                self.generate_expr(func, expr, ir_func)?;
                 func.instruction(&Instruction::Drop);
             }
         }
         Ok(())
     }
 
-    fn generate_expr(&mut self, func: &mut Function, expr: &IRExpr, locals: &[String]) -> Result<()> {
+    fn generate_expr(&mut self, func: &mut Function, expr: &IRExpr, ir_func: &IRFunction) -> Result<()> {
         match expr {
             IRExpr::Const(val) => {
                 func.instruction(&Instruction::I32Const(*val));
             }
             IRExpr::LoadLocal(var) => {
-                let idx = self.get_local_index(var, locals)?;
-                func.instruction(&Instruction::LocalGet(idx));
+                let idx = ir_func.local_map.get(var)
+                    .ok_or_else(|| anyhow::anyhow!("Variable '{}' not in local_map", var))?;
+                func.instruction(&Instruction::LocalGet(*idx));
             }
             IRExpr::BinOp { op, left, right } => {
-                self.generate_expr(func, left, locals)?;
-                self.generate_expr(func, right, locals)?;
-                let instr = match op {
-                    BinOp::Add => Instruction::I32Add,
-                    BinOp::Sub => Instruction::I32Sub,
-                    BinOp::Mul => Instruction::I32Mul,
-                    BinOp::Div => Instruction::I32DivS,
-                    BinOp::Mod => Instruction::I32RemS,
-                    BinOp::Eq => Instruction::I32Eq,
-                    BinOp::Ne => Instruction::I32Ne,
-                    BinOp::Lt => Instruction::I32LtS,
-                    BinOp::Le => Instruction::I32LeS,
-                    BinOp::Gt => Instruction::I32GtS,
-                    BinOp::Ge => Instruction::I32GeS,
-                };
-                func.instruction(&instr);
+                self.generate_expr(func, left, ir_func)?;
+                self.generate_expr(func, right, ir_func)?;
+
+                match op {
+                    BinOp::Div | BinOp::Mod => {
+                        func.instruction(&Instruction::LocalTee(ir_func.locals.len() as u32));
+                        func.instruction(&Instruction::I32Eqz);
+                        func.instruction(&Instruction::If(BlockType::Empty));
+                        func.instruction(&Instruction::Unreachable);
+                        func.instruction(&Instruction::End);
+                        func.instruction(&Instruction::LocalGet(ir_func.locals.len() as u32));
+
+                        let instr = match op {
+                            BinOp::Div => Instruction::I32DivS,
+                            BinOp::Mod => Instruction::I32RemS,
+                            _ => unreachable!(),
+                        };
+                        func.instruction(&instr);
+                    }
+                    _ => {
+                        let instr = match op {
+                            BinOp::Add => Instruction::I32Add,
+                            BinOp::Sub => Instruction::I32Sub,
+                            BinOp::Mul => Instruction::I32Mul,
+                            BinOp::Eq => Instruction::I32Eq,
+                            BinOp::Ne => Instruction::I32Ne,
+                            BinOp::Lt => Instruction::I32LtS,
+                            BinOp::Le => Instruction::I32LeS,
+                            BinOp::Gt => Instruction::I32GtS,
+                            BinOp::Ge => Instruction::I32GeS,
+                            _ => unreachable!(),
+                        };
+                        func.instruction(&instr);
+                    }
+                }
             }
             IRExpr::Call { func: fname, args } => {
                 for arg in args {
-                    self.generate_expr(func, arg, locals)?;
+                    self.generate_expr(func, arg, ir_func)?;
                 }
                 let func_idx = self.function_indices.get(fname)
                     .copied()
@@ -562,47 +636,76 @@ impl WasmCodegen {
                 func.instruction(&Instruction::Call(func_idx));
             }
             IRExpr::List(items) => {
-                // Allocate heap memory for list
-                let size = items.len() as i32 * 4;
-                func.instruction(&Instruction::I32Const(size));
-                // Store items (simplified)
+                let size = (1 + items.len()) * 4;
+
+                func.instruction(&Instruction::GlobalGet(self.heap_offset_global));
+                let list_ptr_local = ir_func.locals.len() as u32 + 1;
+                func.instruction(&Instruction::LocalTee(list_ptr_local));
+
+                func.instruction(&Instruction::I32Const(items.len() as i32));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
                 for (i, item) in items.iter().enumerate() {
-                    self.generate_expr(func, item, locals)?;
+                    func.instruction(&Instruction::LocalGet(list_ptr_local));
+                    self.generate_expr(func, item, ir_func)?;
                     func.instruction(&Instruction::I32Store(MemArg {
-                        offset: (i * 4) as u64,
+                        offset: ((i + 1) * 4) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
                 }
+
+                func.instruction(&Instruction::GlobalGet(self.heap_offset_global));
+                func.instruction(&Instruction::I32Const(size as i32));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::GlobalSet(self.heap_offset_global));
+
+                func.instruction(&Instruction::LocalGet(list_ptr_local));
             }
             IRExpr::Dict(pairs) => {
-                // Allocate heap for dict (key-value pairs)
-                let size = pairs.len() as i32 * 8; // 4 bytes key + 4 bytes value
-                func.instruction(&Instruction::I32Const(size));
-                // Store pairs
+                let size = (1 + pairs.len() * 2) * 4;
+
+                func.instruction(&Instruction::GlobalGet(self.heap_offset_global));
+                let dict_ptr_local = ir_func.locals.len() as u32 + 1;
+                func.instruction(&Instruction::LocalTee(dict_ptr_local));
+
+                func.instruction(&Instruction::I32Const(pairs.len() as i32));
+                func.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
                 for (i, (key, val)) in pairs.iter().enumerate() {
-                    self.generate_expr(func, key, locals)?;
+                    func.instruction(&Instruction::LocalGet(dict_ptr_local));
+                    self.generate_expr(func, key, ir_func)?;
                     func.instruction(&Instruction::I32Store(MemArg {
-                        offset: (i * 8) as u64,
+                        offset: ((i * 2 + 1) * 4) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
-                    self.generate_expr(func, val, locals)?;
+
+                    func.instruction(&Instruction::LocalGet(dict_ptr_local));
+                    self.generate_expr(func, val, ir_func)?;
                     func.instruction(&Instruction::I32Store(MemArg {
-                        offset: (i * 8 + 4) as u64,
+                        offset: ((i * 2 + 2) * 4) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
                 }
+
+                func.instruction(&Instruction::GlobalGet(self.heap_offset_global));
+                func.instruction(&Instruction::I32Const(size as i32));
+                func.instruction(&Instruction::I32Add);
+                func.instruction(&Instruction::GlobalSet(self.heap_offset_global));
+
+                func.instruction(&Instruction::LocalGet(dict_ptr_local));
             }
         }
         Ok(())
-    }
-
-    fn get_local_index(&self, var: &str, locals: &[String]) -> Result<u32> {
-        locals.iter()
-            .position(|l| l == var)
-            .map(|i| i as u32)
-            .ok_or_else(|| anyhow::anyhow!("Variable '{}' not found in locals", var))
     }
 }
