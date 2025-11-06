@@ -42,7 +42,7 @@ Certus is a **trustless general-purpose compute protocol**. This Python verifier
 
 ## Compiler Architecture
 
-**3-Stage Pipeline (Production Quality):**
+**3-Stage Pipeline:**
 
 ```
 Python Source Code
