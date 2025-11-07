@@ -1,9 +1,11 @@
 use anyhow::{Result, Context, bail};
 use ethers::prelude::*;
 use ethers::abi::{encode, decode, Token, ParamType};
+use ethers::signers::Signer as EthersSigner;
 use std::sync::{Arc, Mutex};
 use crate::PythonExecutor;
 use crate::reliability::{retry_with_backoff, RetryConfig, validate_address};
+use ed25519_dalek::Signer;
 
 /// Integrates Python execution with Certus protocol contracts
 pub struct CertusIntegration {
@@ -12,6 +14,7 @@ pub struct CertusIntegration {
     pub jobs_contract: H160,
     provider: Arc<Provider<Http>>,
     signer: Arc<SignerMiddleware<Provider<Http>, LocalWallet>>,
+    wallet: LocalWallet,
 }
 
 impl CertusIntegration {
@@ -38,9 +41,10 @@ impl CertusIntegration {
             &RetryConfig::default(),
         ).await?.as_u64();
 
+        let wallet_with_chain = wallet.clone().with_chain_id(chain_id);
         let signer = Arc::new(SignerMiddleware::new(
             provider.clone(),
-            wallet.with_chain_id(chain_id),
+            wallet_with_chain,
         ));
 
         Ok(Self {
@@ -49,6 +53,7 @@ impl CertusIntegration {
             jobs_contract: jobs_addr.parse()?,
             provider: Arc::new(provider),
             signer,
+            wallet,
         })
     }
 
@@ -502,12 +507,24 @@ impl CertusIntegration {
 
     /// Generate Ed25519 signature for execution proof
     fn generate_execution_signature(&self, job_id: [u8; 32], output_hash: [u8; 32]) -> Vec<u8> {
-        // For demo purposes, generate a placeholder 64-byte signature
-        // In production, use proper Ed25519 signing
-        let mut sig = vec![0u8; 64];
-        sig[..32].copy_from_slice(&job_id);
-        sig[32..].copy_from_slice(&output_hash);
-        sig
+        use sha2::{Sha256, Digest};
+
+        // Create message digest
+        let mut hasher = Sha256::new();
+        hasher.update(&job_id);
+        hasher.update(&output_hash);
+        hasher.update(self.signer.address().as_bytes());
+        let message = hasher.finalize();
+
+        // Derive deterministic Ed25519 keypair from ECDSA wallet private key
+        let key_bytes = self.wallet.signer().to_bytes();
+        let mut seed_hasher = Sha256::new();
+        seed_hasher.update(&key_bytes[..]);
+        seed_hasher.update(b"CERTUS_ED25519_SEED");
+        let seed: [u8; 32] = seed_hasher.finalize().into();
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        signing_key.sign(&message).to_bytes().to_vec()
     }
 
     /// Compute deterministic job ID per Certus protocol specification

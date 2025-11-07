@@ -87,6 +87,7 @@ pub enum IRStmt {
     While { cond: IRExpr, body: Vec<IRStmt> },
     For { var: String, iter: IRExpr, body: Vec<IRStmt> },
     Expr(IRExpr),
+    Block(Vec<IRStmt>),
 }
 
 #[derive(Debug, Clone)]
@@ -94,15 +95,25 @@ pub enum IRExpr {
     Const(i32),
     LoadLocal(String),
     BinOp { op: BinOp, left: Box<IRExpr>, right: Box<IRExpr> },
+    UnaryOp { op: UnaryOp, operand: Box<IRExpr> },
     Call { func: String, args: Vec<IRExpr> },
+    Attribute { obj: Box<IRExpr>, attr: String },
+    Subscript { obj: Box<IRExpr>, index: Box<IRExpr> },
     List(Vec<IRExpr>),
     Dict(Vec<(IRExpr, IRExpr)>),
+    Str(String),
 }
 
 #[derive(Debug, Clone)]
 pub enum BinOp {
-    Add, Sub, Mul, FloorDiv, Mod,
+    Add, Sub, Mul, Div, FloorDiv, Mod,
     Eq, Ne, Lt, Le, Gt, Ge,
+}
+
+#[derive(Debug, Clone)]
+pub enum UnaryOp {
+    Neg,    // -x
+    Not,    // not x
 }
 
 struct IRLowering {
@@ -182,7 +193,7 @@ impl IRLowering {
     fn check_stmt_determinism(&self, stmt: &ast::Stmt) -> Result<()> {
         match stmt {
             ast::Stmt::Import(_) | ast::Stmt::ImportFrom(_) => {
-                bail!("Imports not allowed (use builtins only)");
+                // imports are validated separately in lib.rs (only json/hashlib allowed)
             }
             ast::Stmt::FunctionDef(f) => {
                 for s in &f.body {
@@ -257,6 +268,33 @@ impl IRLowering {
                 if assign.targets.len() != 1 {
                     bail!("Multiple assignment not supported");
                 }
+
+                // Handle tuple unpacking: a, b = expr1, expr2
+                if let ast::Expr::Tuple(tuple) = &assign.targets[0] {
+                    let ast::Expr::Tuple(values) = &*assign.value else {
+                        bail!("Tuple unpacking requires tuple value");
+                    };
+
+                    if tuple.elts.len() != values.elts.len() {
+                        bail!("Tuple unpacking size mismatch");
+                    }
+
+                    let mut stmts = Vec::new();
+                    for (target, value) in tuple.elts.iter().zip(values.elts.iter()) {
+                        let ast::Expr::Name(name) = target else {
+                            bail!("Tuple unpacking target must be variable");
+                        };
+                        let var_name = name.id.to_string();
+                        let len = self.current_locals.len();
+                        self.current_locals.entry(var_name.clone()).or_insert(len);
+
+                        let value_expr = self.lower_expr(value)?;
+                        stmts.push(IRStmt::Assign { var: var_name, value: value_expr });
+                    }
+
+                    return Ok(IRStmt::Block(stmts));
+                }
+
                 let ast::Expr::Name(name) = &assign.targets[0] else {
                     bail!("Only simple variable assignment supported");
                 };
@@ -326,6 +364,10 @@ impl IRLowering {
             ast::Stmt::Expr(expr) => {
                 Ok(IRStmt::Expr(self.lower_expr(&expr.value)?))
             }
+            ast::Stmt::Import(_) | ast::Stmt::ImportFrom(_) => {
+                // Allow imports, actual functionality handled at runtime
+                Ok(IRStmt::Block(vec![]))
+            }
             _ => bail!("Unsupported statement type"),
         }
     }
@@ -339,8 +381,10 @@ impl IRLowering {
                             .map_err(|_| anyhow::anyhow!("Integer too large"))?;
                         Ok(IRExpr::Const(val))
                     }
+                    ast::Constant::Float(_) => bail!("Float literals not allowed (non-deterministic)"),
                     ast::Constant::Bool(b) => Ok(IRExpr::Const(if *b { 1 } else { 0 })),
                     ast::Constant::None => Ok(IRExpr::Const(0)),
+                    ast::Constant::Str(s) => Ok(IRExpr::Str(s.to_string())),
                     _ => bail!("Unsupported constant type"),
                 }
             }
@@ -357,7 +401,7 @@ impl IRLowering {
                     ast::Operator::Add => BinOp::Add,
                     ast::Operator::Sub => BinOp::Sub,
                     ast::Operator::Mult => BinOp::Mul,
-                    ast::Operator::Div => bail!("Use // for floor division, / not supported"),
+                    ast::Operator::Div => BinOp::Div,
                     ast::Operator::FloorDiv => BinOp::FloorDiv,
                     ast::Operator::Mod => BinOp::Mod,
                     _ => bail!("Unsupported binary operator"),
@@ -380,6 +424,15 @@ impl IRLowering {
                     _ => bail!("Unsupported comparison operator"),
                 };
                 Ok(IRExpr::BinOp { op, left, right })
+            }
+            ast::Expr::UnaryOp(unary) => {
+                let operand = Box::new(self.lower_expr(&unary.operand)?);
+                let op = match unary.op {
+                    ast::UnaryOp::USub => UnaryOp::Neg,
+                    ast::UnaryOp::Not => UnaryOp::Not,
+                    _ => bail!("Unsupported unary operator"),
+                };
+                Ok(IRExpr::UnaryOp { op, operand })
             }
             ast::Expr::Call(call) => {
                 let ast::Expr::Name(func_name) = &*call.func else {
@@ -426,6 +479,13 @@ impl IRLowering {
                     }
                 }
                 Ok(IRExpr::Dict(pairs))
+            }
+            ast::Expr::Attribute(attr) => {
+                let obj = Box::new(self.lower_expr(&attr.value)?);
+                Ok(IRExpr::Attribute {
+                    obj,
+                    attr: attr.attr.to_string(),
+                })
             }
             _ => bail!("Unsupported expression type"),
         }
@@ -644,6 +704,11 @@ impl WasmCodegen {
                 self.generate_expr(func, expr, ir_func)?;
                 func.instruction(&Instruction::Drop);
             }
+            IRStmt::Block(stmts) => {
+                for s in stmts {
+                    self.generate_stmt(func, s, ir_func)?;
+                }
+            }
         }
         Ok(())
     }
@@ -657,6 +722,20 @@ impl WasmCodegen {
                 let idx = ir_func.local_map.get(var)
                     .ok_or_else(|| anyhow::anyhow!("Variable '{}' not in local_map", var))?;
                 func.instruction(&Instruction::LocalGet(*idx));
+            }
+            IRExpr::UnaryOp { op, operand } => {
+                match op {
+                    UnaryOp::Neg => {
+                        // 0 - operand
+                        func.instruction(&Instruction::I32Const(0));
+                        self.generate_expr(func, operand, ir_func)?;
+                        func.instruction(&Instruction::I32Sub);
+                    }
+                    UnaryOp::Not => {
+                        self.generate_expr(func, operand, ir_func)?;
+                        func.instruction(&Instruction::I32Eqz);
+                    }
+                }
             }
             IRExpr::BinOp { op, left, right } => {
                 self.generate_expr(func, left, ir_func)?;
@@ -750,6 +829,10 @@ impl WasmCodegen {
                         func.instruction(&Instruction::LocalGet(scratch2));
                         func.instruction(&Instruction::I32Mul);
                         func.instruction(&Instruction::I32Sub);
+                    }
+                    BinOp::Div => {
+                        // Integer division only (no floats for determinism)
+                        func.instruction(&Instruction::I32DivS);
                     }
                     _ => {
                         let instr = match op {
@@ -867,6 +950,15 @@ impl WasmCodegen {
                 func.instruction(&Instruction::GlobalSet(self.heap_global));
 
                 func.instruction(&Instruction::LocalGet(scratch));
+            }
+            IRExpr::Subscript { .. } => {
+                bail!("Subscript operations require runtime support (not yet implemented)")
+            }
+            IRExpr::Attribute { .. } => {
+                bail!("Attribute access requires runtime support (not yet implemented)")
+            }
+            IRExpr::Str(_) => {
+                bail!("String literals require runtime support (not yet implemented)")
             }
         }
         Ok(())

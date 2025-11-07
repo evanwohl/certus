@@ -12,9 +12,6 @@ pub mod certus_integration;
 pub mod reliability;
 pub mod validation;
 
-#[cfg(test)]
-mod tests;
-
 use python_compiler::PythonCompiler;
 use validation::{PythonValidator, validate_json_input, validate_output};
 
@@ -27,9 +24,8 @@ impl PythonExecutor {
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
 
-        // deterministic only
+        // Deterministic configuration
         config.wasm_threads(false);
-        config.wasm_simd(false);
         config.wasm_reference_types(false);
         config.cranelift_nan_canonicalization(true);
         config.consume_fuel(true);

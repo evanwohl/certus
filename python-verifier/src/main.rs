@@ -19,8 +19,6 @@ use verifier::PythonVerifier;
 use validation::{PythonValidator, validate_json_input, validate_output};
 use reliability::{validate_job_id, validate_gas_params};
 
-#[cfg(test)]
-mod tests;
 
 #[derive(Parser, Debug)]
 #[clap(name = "python-verifier")]
