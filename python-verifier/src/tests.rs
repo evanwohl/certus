@@ -1,11 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{PythonExecutor, PythonJob};
 
     #[test]
     fn test_deterministic_execution() {
-        let executor = PythonExecutor::new().unwrap();
+        let mut executor = PythonExecutor::new().unwrap();
 
         let code = r#"
 def fibonacci(n):
@@ -35,7 +34,7 @@ OUTPUT = fibonacci(INPUT["n"])
 
     #[test]
     fn test_merkle_tree() {
-        let executor = PythonExecutor::new().unwrap();
+        let mut executor = PythonExecutor::new().unwrap();
 
         let code = std::fs::read_to_string("examples/merkle_tree.py").unwrap();
         let input = r#"{"leaves": ["tx1", "tx2", "tx3", "tx4"]}"#;
@@ -50,7 +49,7 @@ OUTPUT = fibonacci(INPUT["n"])
 
     #[test]
     fn test_monte_carlo_determinism() {
-        let executor = PythonExecutor::new().unwrap();
+        let mut executor = PythonExecutor::new().unwrap();
 
         let code = std::fs::read_to_string("examples/monte_carlo_pi.py").unwrap();
         let input = r#"{"seed": 12345, "iterations": 1000}"#;
@@ -69,7 +68,7 @@ OUTPUT = fibonacci(INPUT["n"])
 
     #[test]
     fn test_invalid_operations_rejected() {
-        let executor = PythonExecutor::new().unwrap();
+        let mut executor = PythonExecutor::new().unwrap();
 
         // test file i/o rejection
         let bad_code = r#"
@@ -101,7 +100,7 @@ OUTPUT = eval("1 + 1")
 
     #[test]
     fn test_fuel_limits() {
-        let executor = PythonExecutor::new().unwrap();
+        let mut executor = PythonExecutor::new().unwrap();
 
         // infinite loop should hit fuel limit
         let bad_code = r#"
@@ -116,7 +115,7 @@ OUTPUT = "never reached"
 
     #[test]
     fn test_memory_limits() {
-        let executor = PythonExecutor::new().unwrap();
+        let mut executor = PythonExecutor::new().unwrap();
 
         // try to allocate huge list
         let bad_code = r#"
@@ -130,7 +129,6 @@ OUTPUT = len(huge_list)
 
     #[tokio::test]
     async fn test_verification_flow() {
-        use crate::verifier::PythonVerifier;
 
         // would need deployed contract
         // let verifier = PythonVerifier::new(
