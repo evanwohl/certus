@@ -323,7 +323,7 @@ impl CertusIntegration {
         self.executor.lock().unwrap().validate_python(code)?;
 
         // Compile to Wasm bytecode
-        let mut compiler = crate::python_compiler::PythonCompiler::new();
+        let mut compiler = crate::compiler::PythonCompiler::new();
         let wasm_module = compiler.compile(code)?;
 
         // Verify module is valid Wasm

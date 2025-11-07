@@ -3,6 +3,7 @@ use anyhow::{Result, bail, Context};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 
+pub mod compiler;
 pub mod python_compiler;
 pub mod verifier;
 pub mod api;

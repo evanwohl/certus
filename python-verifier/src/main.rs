@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::sync::{Arc, Mutex};
 
+mod compiler;
 mod verifier;
 mod api;
 mod websocket;
@@ -9,7 +10,6 @@ mod queue;
 mod certus_integration;
 mod reliability;
 mod validation;
-mod python_compiler;
 
 use python_verifier::PythonExecutor;
 use certus_integration::CertusIntegration;
