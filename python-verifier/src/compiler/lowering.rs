@@ -297,7 +297,7 @@ impl IRLowering {
                     ast::Constant::Float(_) => bail!("Float literals not allowed (non-deterministic)"),
                     ast::Constant::Bool(b) => Ok(IRExpr::Const(if *b { 1 } else { 0 })),
                     ast::Constant::None => Ok(IRExpr::Const(0)),
-                    ast::Constant::Str(_) => bail!("String literals require runtime support"),
+                    ast::Constant::Str(s) => Ok(IRExpr::Str(s.to_string())),
                     _ => bail!("Unsupported constant type"),
                 }
             }
@@ -391,10 +391,33 @@ impl IRLowering {
                 Ok(IRExpr::Dict(pairs))
             }
             ast::Expr::Subscript(sub) => {
-                // Lower subscript to IR
-                let value = Box::new(self.lower_expr(&sub.value)?);
-                let index = Box::new(self.lower_expr(&sub.slice)?);
-                Ok(IRExpr::Subscript { value, index })
+                // Check if this is a slice or subscript
+                if let ast::Expr::Slice(slice) = &*sub.slice {
+                    let value = Box::new(self.lower_expr(&sub.value)?);
+                    let start = slice.lower.as_ref()
+                        .map(|e| self.lower_expr(e))
+                        .transpose()?
+                        .map(Box::new);
+                    let end = slice.upper.as_ref()
+                        .map(|e| self.lower_expr(e))
+                        .transpose()?
+                        .map(Box::new);
+                    if slice.step.is_some() {
+                        bail!("Slice step not supported");
+                    }
+                    Ok(IRExpr::Slice { value, start, end })
+                } else {
+                    let value = Box::new(self.lower_expr(&sub.value)?);
+                    let index = Box::new(self.lower_expr(&sub.slice)?);
+                    Ok(IRExpr::Subscript { value, index })
+                }
+            }
+            ast::Expr::IfExp(ifexp) => {
+                // Python ternary: body if test else orelse
+                let cond = Box::new(self.lower_expr(&ifexp.test)?);
+                let then_val = Box::new(self.lower_expr(&ifexp.body)?);
+                let else_val = Box::new(self.lower_expr(&ifexp.orelse)?);
+                Ok(IRExpr::IfExpr { cond, then_val, else_val })
             }
             ast::Expr::Attribute(_) => bail!("Attribute access requires runtime support"),
             _ => bail!("Unsupported expression type"),

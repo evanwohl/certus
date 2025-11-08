@@ -37,6 +37,7 @@ pub enum IRStmt {
 #[derive(Debug, Clone)]
 pub enum IRExpr {
     Const(i32),
+    Str(String),
     LoadLocal(String),
     BinOp { op: BinOp, left: Box<IRExpr>, right: Box<IRExpr> },
     UnaryOp { op: UnaryOp, operand: Box<IRExpr> },
@@ -47,6 +48,18 @@ pub enum IRExpr {
     Subscript {                  // Subscript: x[i]
         value: Box<IRExpr>,
         index: Box<IRExpr>,
+    },
+    // String slice: s[start:end]
+    Slice {
+        value: Box<IRExpr>,
+        start: Option<Box<IRExpr>>,
+        end: Option<Box<IRExpr>>,
+    },
+    // Conditional expression: value_if_true if condition else value_if_false
+    IfExpr {
+        cond: Box<IRExpr>,
+        then_val: Box<IRExpr>,
+        else_val: Box<IRExpr>,
     },
 }
 

@@ -10,6 +10,7 @@ pub const HEAP_LIMIT_GLOBAL: u32 = 2; // Global index for heap limit
 // Type tags for runtime discrimination
 const TYPE_LIST: i32 = 1;
 const TYPE_DICT: i32 = 2;
+const TYPE_STRING: i32 = 3;
 
 // FNV-1a hash constants (deterministic, no seed)
 const FNV_OFFSET_BASIS: i32 = 2166136261u32 as i32;
@@ -380,5 +381,403 @@ impl DictLayout {
         func.instruction(&Instruction::Br(0));
         func.instruction(&Instruction::End);
         func.instruction(&Instruction::End);
+    }
+}
+
+// String memory layout helpers
+pub struct StringLayout;
+
+impl StringLayout {
+    /// Allocate string in heap: [type:i32][length:i32][bytes...]
+    /// Returns: str_ptr on stack
+    pub fn alloc(func: &mut Function, bytes: &[u8]) {
+        let length = bytes.len() as i32;
+        let size = 8 + bytes.len();
+        let aligned_size = (size + 3) & !3;
+
+        // Check heap overflow
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::I32Const(aligned_size as i32));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalGet(HEAP_LIMIT_GLOBAL));
+        func.instruction(&Instruction::I32GtU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+
+        // Store type tag
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::I32Const(TYPE_STRING));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+
+        // Store length
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::I32Const(length));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+
+        // Return string pointer before updating heap ptr
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+
+        // Update heap pointer
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::I32Const(aligned_size as i32));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalSet(HEAP_PTR_GLOBAL));
+    }
+
+    /// Load string length: str_ptr -> length
+    pub fn load_length(func: &mut Function) {
+        func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+    }
+
+    /// Create substring: str_ptr, start, end -> new_str_ptr
+    pub fn slice(func: &mut Function, src: u32, start: u32, end: u32, len: u32, new_ptr: u32, counter: u32) {
+        func.instruction(&Instruction::LocalSet(end));
+        func.instruction(&Instruction::LocalSet(start));
+        func.instruction(&Instruction::LocalSet(src));
+
+        // Get string length
+        func.instruction(&Instruction::LocalGet(src));
+        Self::load_length(func);
+        func.instruction(&Instruction::LocalSet(len));
+
+        // Clamp start to [0, len]
+        func.instruction(&Instruction::LocalGet(start));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32LtS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(start));
+        func.instruction(&Instruction::End);
+
+        func.instruction(&Instruction::LocalGet(start));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::I32GtS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::LocalSet(start));
+        func.instruction(&Instruction::End);
+
+        // Clamp end to [start, len]
+        func.instruction(&Instruction::LocalGet(end));
+        func.instruction(&Instruction::LocalGet(start));
+        func.instruction(&Instruction::I32LtS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(start));
+        func.instruction(&Instruction::LocalSet(end));
+        func.instruction(&Instruction::End);
+
+        func.instruction(&Instruction::LocalGet(end));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::I32GtS);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::LocalSet(end));
+        func.instruction(&Instruction::End);
+
+        // Calculate slice length
+        func.instruction(&Instruction::LocalGet(end));
+        func.instruction(&Instruction::LocalGet(start));
+        func.instruction(&Instruction::I32Sub);
+        func.instruction(&Instruction::LocalSet(len));
+
+        // Allocate new string
+        let aligned_size_expr = |f: &mut Function| {
+            f.instruction(&Instruction::LocalGet(len));
+            f.instruction(&Instruction::I32Const(11));
+            f.instruction(&Instruction::I32Add);
+            f.instruction(&Instruction::I32Const(-4));
+            f.instruction(&Instruction::I32And);
+        };
+
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        aligned_size_expr(func);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalGet(HEAP_LIMIT_GLOBAL));
+        func.instruction(&Instruction::I32GtU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::LocalTee(new_ptr));
+        func.instruction(&Instruction::I32Const(TYPE_STRING));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+
+        func.instruction(&Instruction::LocalGet(new_ptr));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+
+        // Copy bytes
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(counter));
+
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::LocalGet(len));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+
+        func.instruction(&Instruction::LocalGet(new_ptr));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+
+        func.instruction(&Instruction::LocalGet(src));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(start));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Load8U(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+        func.instruction(&Instruction::I32Store8(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(counter));
+
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        // Update heap pointer
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        aligned_size_expr(func);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalSet(HEAP_PTR_GLOBAL));
+
+        // Return new string pointer
+        func.instruction(&Instruction::LocalGet(new_ptr));
+    }
+
+    /// Concatenate two strings: str1_ptr, str2_ptr -> new_str_ptr
+    /// Pops [str2, str1] from stack, pushes new_str_ptr
+    pub fn concat(func: &mut Function, str1: u32, str2: u32, len1: u32, len2: u32, new_ptr: u32, slice_len: u32, counter: u32) {
+        func.instruction(&Instruction::LocalSet(str2));
+        func.instruction(&Instruction::LocalSet(str1));
+
+        // Load str1 length
+        func.instruction(&Instruction::LocalGet(str1));
+        Self::load_length(func);
+        func.instruction(&Instruction::LocalSet(len1));
+
+        // Load str2 length
+        func.instruction(&Instruction::LocalGet(str2));
+        Self::load_length(func);
+        func.instruction(&Instruction::LocalSet(len2));
+
+        // Calculate total length
+        func.instruction(&Instruction::LocalGet(len1));
+        func.instruction(&Instruction::LocalGet(len2));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(slice_len));
+
+        // Heap overflow check
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::LocalGet(slice_len));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(3));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(-4));
+        func.instruction(&Instruction::I32And);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalGet(HEAP_LIMIT_GLOBAL));
+        func.instruction(&Instruction::I32GtU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+
+        // Allocate new string header
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::LocalTee(new_ptr));
+        func.instruction(&Instruction::I32Const(TYPE_STRING));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
+
+        func.instruction(&Instruction::LocalGet(new_ptr));
+        func.instruction(&Instruction::LocalGet(slice_len));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+
+        // Copy str1 bytes: loop counter = 0 to len1
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(counter));
+
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::LocalGet(len1));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+
+        func.instruction(&Instruction::LocalGet(new_ptr));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(str1));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Load8U(MemArg { offset: 0, align: 0, memory_index: 0 }));
+        func.instruction(&Instruction::I32Store8(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(counter));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        // Copy str2 bytes: loop counter = 0 to len2
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(counter));
+
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::LocalGet(len2));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+
+        func.instruction(&Instruction::LocalGet(new_ptr));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(len1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(str2));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Load8U(MemArg { offset: 0, align: 0, memory_index: 0 }));
+        func.instruction(&Instruction::I32Store8(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(counter));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        // Update heap pointer with aligned size
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::LocalGet(slice_len));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(3));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Const(-4));
+        func.instruction(&Instruction::I32And);
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::GlobalSet(HEAP_PTR_GLOBAL));
+
+        // Return new string pointer
+        func.instruction(&Instruction::LocalGet(new_ptr));
+    }
+
+    /// String equality: str1_ptr, str2_ptr -> bool (1 or 0)
+    /// Pops [str2, str1] from stack, pushes 1 if equal, 0 otherwise
+    pub fn equals(func: &mut Function, str1: u32, str2: u32, len1: u32, len2: u32, counter: u32) {
+        func.instruction(&Instruction::LocalSet(str2));
+        func.instruction(&Instruction::LocalSet(str1));
+
+        // Load lengths
+        func.instruction(&Instruction::LocalGet(str1));
+        Self::load_length(func);
+        func.instruction(&Instruction::LocalSet(len1));
+
+        func.instruction(&Instruction::LocalGet(str2));
+        Self::load_length(func);
+        func.instruction(&Instruction::LocalSet(len2));
+
+        // Fast path: if lengths differ, return 0
+        func.instruction(&Instruction::LocalGet(len1));
+        func.instruction(&Instruction::LocalGet(len2));
+        func.instruction(&Instruction::I32Ne);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::Return);
+        func.instruction(&Instruction::End);
+
+        // Compare bytes: loop counter = 0 to len1
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::LocalSet(counter));
+
+        func.instruction(&Instruction::Block(BlockType::Empty));
+        func.instruction(&Instruction::Loop(BlockType::Empty));
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::LocalGet(len1));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::BrIf(1));
+
+        // Load byte from str1
+        func.instruction(&Instruction::LocalGet(str1));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Load8U(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+        // Load byte from str2
+        func.instruction(&Instruction::LocalGet(str2));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Load8U(MemArg { offset: 0, align: 0, memory_index: 0 }));
+
+        // If bytes differ, return 0
+        func.instruction(&Instruction::I32Ne);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::Return);
+        func.instruction(&Instruction::End);
+
+        func.instruction(&Instruction::LocalGet(counter));
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalSet(counter));
+        func.instruction(&Instruction::Br(0));
+        func.instruction(&Instruction::End);
+        func.instruction(&Instruction::End);
+
+        // All bytes equal, return 1
+        func.instruction(&Instruction::I32Const(1));
+    }
+
+    /// String indexing: str_ptr, index -> byte value (as i32)
+    /// Pops [index, str_ptr] from stack, pushes byte value
+    /// Traps if index out of bounds
+    pub fn index(func: &mut Function, str_ptr: u32, index: u32) {
+        func.instruction(&Instruction::LocalSet(index));
+        func.instruction(&Instruction::LocalSet(str_ptr));
+
+        // Bounds check: index < length
+        func.instruction(&Instruction::LocalGet(index));
+        func.instruction(&Instruction::LocalGet(str_ptr));
+        Self::load_length(func);
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+
+        // Load byte at str_ptr + 8 + index
+        func.instruction(&Instruction::LocalGet(str_ptr));
+        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::LocalGet(index));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Load8U(MemArg { offset: 0, align: 0, memory_index: 0 }));
     }
 }

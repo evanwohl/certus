@@ -89,6 +89,7 @@ impl WasmCodegen {
         // Export section
         let mut exports = ExportSection::new();
         exports.export("main", ExportKind::Func, 0);
+        exports.export("memory", ExportKind::Memory, 0);
         module.section(&exports);
 
         // Code section
@@ -308,11 +309,94 @@ impl WasmCodegen {
                 }
             }
             IRExpr::BinOp { op, left, right } => {
-                self.generate_expr(func, left, ir_func, gas_temp_local, next_scratch)?;
-                self.generate_expr(func, right, ir_func, gas_temp_local, next_scratch)?;
-
+                // Runtime type dispatch for string operations
                 match op {
-                    BinOp::FloorDiv => {
+                    BinOp::Add => {
+                        // Type-aware addition: string concatenation or integer addition
+                        let saved_scratch = *next_scratch;
+                        let left_local = *next_scratch;
+                        let right_local = left_local + 1;
+                        *next_scratch = right_local + 1;
+
+                        self.generate_expr(func, left, ir_func, gas_temp_local, next_scratch)?;
+                        func.instruction(&Instruction::LocalSet(left_local));
+
+                        self.generate_expr(func, right, ir_func, gas_temp_local, next_scratch)?;
+                        func.instruction(&Instruction::LocalSet(right_local));
+
+                        // Check if left is heap pointer (>= 1024) AND is string (type tag == 3)
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::I32Const(1024));
+                        func.instruction(&Instruction::I32GeU);
+
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        func.instruction(&Instruction::I32Const(3)); // TYPE_STRING
+                        func.instruction(&Instruction::I32Eq);
+
+                        func.instruction(&Instruction::I32And);
+
+                        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                        // String concatenation path
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::LocalGet(right_local));
+                        let base = *next_scratch;
+                        memory::StringLayout::concat(func, base, base + 1, base + 2, base + 3, base + 4, base + 5, base + 6);
+                        func.instruction(&Instruction::Else);
+                        // Integer addition path
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::LocalGet(right_local));
+                        func.instruction(&Instruction::I32Add);
+                        func.instruction(&Instruction::End);
+
+                        *next_scratch = saved_scratch;
+                    }
+                    BinOp::Eq => {
+                        // Type-aware equality: string equals or integer equals
+                        let saved_scratch = *next_scratch;
+                        let left_local = *next_scratch;
+                        let right_local = left_local + 1;
+                        *next_scratch = right_local + 1;
+
+                        self.generate_expr(func, left, ir_func, gas_temp_local, next_scratch)?;
+                        func.instruction(&Instruction::LocalSet(left_local));
+
+                        self.generate_expr(func, right, ir_func, gas_temp_local, next_scratch)?;
+                        func.instruction(&Instruction::LocalSet(right_local));
+
+                        // Check if left is heap pointer (>= 1024) AND is string (type tag == 3)
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::I32Const(1024));
+                        func.instruction(&Instruction::I32GeU);
+
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                        func.instruction(&Instruction::I32Const(3)); // TYPE_STRING
+                        func.instruction(&Instruction::I32Eq);
+
+                        func.instruction(&Instruction::I32And);
+
+                        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                        // String equality path
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::LocalGet(right_local));
+                        let base = *next_scratch;
+                        memory::StringLayout::equals(func, base, base + 1, base + 2, base + 3, base + 4);
+                        func.instruction(&Instruction::Else);
+                        // Integer equality path
+                        func.instruction(&Instruction::LocalGet(left_local));
+                        func.instruction(&Instruction::LocalGet(right_local));
+                        func.instruction(&Instruction::I32Eq);
+                        func.instruction(&Instruction::End);
+
+                        *next_scratch = saved_scratch;
+                    }
+                    _ => {
+                        self.generate_expr(func, left, ir_func, gas_temp_local, next_scratch)?;
+                        self.generate_expr(func, right, ir_func, gas_temp_local, next_scratch)?;
+
+                        match op {
+                            BinOp::FloorDiv => {
                         let scratch0 = ir_func.locals.len() as u32;
                         let scratch1 = scratch0 + 1;
                         let scratch2 = scratch0 + 2;
@@ -407,20 +491,20 @@ impl WasmCodegen {
                         // Integer division only (no floats for determinism)
                         func.instruction(&Instruction::I32DivS);
                     }
-                    _ => {
-                        let instr = match op {
-                            BinOp::Add => Instruction::I32Add,
-                            BinOp::Sub => Instruction::I32Sub,
-                            BinOp::Mul => Instruction::I32Mul,
-                            BinOp::Eq => Instruction::I32Eq,
-                            BinOp::Ne => Instruction::I32Ne,
-                            BinOp::Lt => Instruction::I32LtS,
-                            BinOp::Le => Instruction::I32LeS,
-                            BinOp::Gt => Instruction::I32GtS,
-                            BinOp::Ge => Instruction::I32GeS,
-                            _ => unreachable!(),
-                        };
-                        func.instruction(&instr);
+                            _ => {
+                                let instr = match op {
+                                    BinOp::Sub => Instruction::I32Sub,
+                                    BinOp::Mul => Instruction::I32Mul,
+                                    BinOp::Ne => Instruction::I32Ne,
+                                    BinOp::Lt => Instruction::I32LtS,
+                                    BinOp::Le => Instruction::I32LeS,
+                                    BinOp::Gt => Instruction::I32GtS,
+                                    BinOp::Ge => Instruction::I32GeS,
+                                    _ => unreachable!(),
+                                };
+                                func.instruction(&instr);
+                            }
+                        }
                     }
                 }
             }
@@ -468,14 +552,116 @@ impl WasmCodegen {
                 func.instruction(&Instruction::LocalGet(base));
             }
             IRExpr::Subscript { value, index } => {
+                // Type-aware subscript: string indexing or list/dict access
+                let saved_scratch = *next_scratch;
+                let value_local = *next_scratch;
+                let index_local = value_local + 1;
+                *next_scratch = index_local + 1;
+
                 self.generate_expr(func, value, ir_func, gas_temp_local, next_scratch)?;
+                func.instruction(&Instruction::LocalSet(value_local));
+
                 self.generate_expr(func, index, ir_func, gas_temp_local, next_scratch)?;
+                func.instruction(&Instruction::LocalSet(index_local));
 
-                let scratch0 = *next_scratch;
-                let scratch1 = scratch0 + 1;
-                *next_scratch = scratch1 + 1;
+                // Check if value is heap pointer (>= 1024) AND is string (type tag == 3)
+                func.instruction(&Instruction::LocalGet(value_local));
+                func.instruction(&Instruction::I32Const(1024));
+                func.instruction(&Instruction::I32GeU);
 
-                memory::ListLayout::load_element(func, scratch0, scratch1);
+                func.instruction(&Instruction::LocalGet(value_local));
+                func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                func.instruction(&Instruction::I32Const(3)); // TYPE_STRING
+                func.instruction(&Instruction::I32Eq);
+
+                func.instruction(&Instruction::I32And);
+
+                func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                // String indexing path
+                func.instruction(&Instruction::LocalGet(value_local));
+                func.instruction(&Instruction::LocalGet(index_local));
+                let str_base = *next_scratch;
+                memory::StringLayout::index(func, str_base, str_base + 1);
+                func.instruction(&Instruction::Else);
+                // List/dict access path
+                func.instruction(&Instruction::LocalGet(value_local));
+                func.instruction(&Instruction::LocalGet(index_local));
+                let list_base = *next_scratch;
+                memory::ListLayout::load_element(func, list_base, list_base + 1);
+                func.instruction(&Instruction::End);
+
+                *next_scratch = saved_scratch;
+            }
+            IRExpr::Str(s) => {
+                let bytes = s.as_bytes();
+                let base = *next_scratch;
+                *next_scratch = base + 1;
+
+                memory::StringLayout::alloc(func, bytes);
+                func.instruction(&Instruction::LocalSet(base));
+
+                // Copy bytes into allocated string
+                for (i, &byte) in bytes.iter().enumerate() {
+                    func.instruction(&Instruction::LocalGet(base));
+                    func.instruction(&Instruction::I32Const(8 + i as i32));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Const(byte as i32));
+                    func.instruction(&Instruction::I32Store8(MemArg { offset: 0, align: 0, memory_index: 0 }));
+                }
+
+                func.instruction(&Instruction::LocalGet(base));
+            }
+            IRExpr::Slice { value, start, end } => {
+                // Stack needs to be: [str_ptr, start, end] before slice call
+                let str_local = *next_scratch;
+                *next_scratch = str_local + 1;
+
+                // Generate and save string pointer
+                self.generate_expr(func, value, ir_func, gas_temp_local, next_scratch)?;
+                func.instruction(&Instruction::LocalSet(str_local));
+
+                // Generate start (default 0)
+                if let Some(start_expr) = start {
+                    self.generate_expr(func, start_expr, ir_func, gas_temp_local, next_scratch)?;
+                } else {
+                    func.instruction(&Instruction::I32Const(0));
+                }
+
+                // Generate end (default string length)
+                if let Some(end_expr) = end {
+                    self.generate_expr(func, end_expr, ir_func, gas_temp_local, next_scratch)?;
+                } else {
+                    // Load string length as default end
+                    func.instruction(&Instruction::LocalGet(str_local));
+                    memory::StringLayout::load_length(func);
+                }
+
+                // Now stack is [start, end], need to get str_ptr under them
+                let start_local = *next_scratch;
+                let end_local = start_local + 1;
+                *next_scratch = end_local + 1;
+
+                func.instruction(&Instruction::LocalSet(end_local));
+                func.instruction(&Instruction::LocalSet(start_local));
+                func.instruction(&Instruction::LocalGet(str_local));
+                func.instruction(&Instruction::LocalGet(start_local));
+                func.instruction(&Instruction::LocalGet(end_local));
+
+                // Allocate scratch locals for slice operation
+                let base = *next_scratch;
+                *next_scratch = base + 6;
+
+                memory::StringLayout::slice(func, base, base + 1, base + 2, base + 3, base + 4, base + 5);
+            }
+            IRExpr::IfExpr { cond, then_val, else_val } => {
+                // Conditional expression: if(cond) then_val else else_val
+                self.generate_expr(func, cond, ir_func, gas_temp_local, next_scratch)?;
+
+                func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                self.generate_expr(func, then_val, ir_func, gas_temp_local, next_scratch)?;
+                func.instruction(&Instruction::Else);
+                self.generate_expr(func, else_val, ir_func, gas_temp_local, next_scratch)?;
+                func.instruction(&Instruction::End);
             }
         }
         Ok(())

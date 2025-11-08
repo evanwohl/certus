@@ -1,11 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::io::{self, Read};
 use serde_json::json;
-use std::sync::Mutex;
 use base64::Engine;
-
-// Use python-verifier library
-use python_verifier::PythonExecutor;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
