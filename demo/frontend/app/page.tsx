@@ -3,8 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import styles from './page.module.css';
 
-const API_URL = 'http://localhost:4000';
-const WS_URL = 'ws://localhost:4000';
+const API_URL = 'https://certus.run';
+const WS_URL = 'wss://certus.run';
 
 const EXAMPLES = {
   fibonacci: `# Fast Fibonacci (20 iterations)
