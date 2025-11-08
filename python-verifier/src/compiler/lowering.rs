@@ -200,6 +200,14 @@ impl IRLowering {
                     return Ok(IRStmt::Block(stmts));
                 }
 
+                // Handle subscript assignment: x[i] = value
+                if let ast::Expr::Subscript(sub) = &assign.targets[0] {
+                    let target = Box::new(self.lower_expr(&sub.value)?);
+                    let index = Box::new(self.lower_expr(&sub.slice)?);
+                    let value = Box::new(self.lower_expr(&assign.value)?);
+                    return Ok(IRStmt::SubscriptAssign { target, index, value });
+                }
+
                 let ast::Expr::Name(name) = &assign.targets[0] else {
                     bail!("Only simple variable assignment supported");
                 };

@@ -7,6 +7,10 @@ use wasm_encoder::*;
 pub const HEAP_PTR_GLOBAL: u32 = 1;  // Global index for heap pointer
 pub const HEAP_LIMIT_GLOBAL: u32 = 2; // Global index for heap limit
 
+// Type tags for runtime discrimination
+const TYPE_LIST: i32 = 1;
+const TYPE_DICT: i32 = 2;
+
 // FNV-1a hash constants (deterministic, no seed)
 const FNV_OFFSET_BASIS: i32 = 2166136261u32 as i32;
 const FNV_PRIME: i32 = 16777619;
@@ -15,10 +19,10 @@ const FNV_PRIME: i32 = 16777619;
 pub struct ListLayout;
 
 impl ListLayout {
-    /// Allocate list in heap: [length:i32][capacity:i32][elem0:i32][elem1:i32]...
+    /// Allocate list in heap: [type:i32][length:i32][capacity:i32][elem0:i32][elem1:i32]...
     /// Returns: list_ptr on stack
     pub fn alloc(func: &mut Function, length: u32) {
-        let size = 8 + (length * 4);
+        let size = 12 + (length * 4);
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
         func.instruction(&Instruction::I32Const(size as i32));
@@ -30,12 +34,16 @@ impl ListLayout {
         func.instruction(&Instruction::End);
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
-        func.instruction(&Instruction::I32Const(length as i32));
+        func.instruction(&Instruction::I32Const(TYPE_LIST));
         func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
         func.instruction(&Instruction::I32Const(length as i32));
         func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::I32Const(length as i32));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 8, align: 2, memory_index: 0 }));
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
         func.instruction(&Instruction::I32Const(size as i32));
@@ -50,18 +58,16 @@ impl ListLayout {
     /// Store element at index: list_ptr, index, value -> ()
     pub fn store_element(func: &mut Function, scratch0: u32) {
         // Stack: list_ptr, index, value
-        func.instruction(&Instruction::LocalSet(scratch0)); // save value
+        func.instruction(&Instruction::LocalSet(scratch0));
 
-        // Calculate offset: 8 + (index * 4)
+        // Calculate offset: 12 + (index * 4)
         func.instruction(&Instruction::I32Const(4));
         func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Const(12));
         func.instruction(&Instruction::I32Add);
 
-        // Add to list_ptr
         func.instruction(&Instruction::I32Add);
 
-        // Store value
         func.instruction(&Instruction::LocalGet(scratch0));
         func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
     }
@@ -72,22 +78,53 @@ impl ListLayout {
         func.instruction(&Instruction::LocalSet(scratch1));
         func.instruction(&Instruction::LocalSet(scratch0));
 
+        // bounds check: index < length (at offset 4)
         func.instruction(&Instruction::LocalGet(scratch1));
         func.instruction(&Instruction::LocalGet(scratch0));
-        func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+        func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
         func.instruction(&Instruction::I32GeU);
         func.instruction(&Instruction::If(BlockType::Empty));
         func.instruction(&Instruction::Unreachable);
         func.instruction(&Instruction::End);
 
+        // compute address: list_ptr + 12 + (index * 4)
         func.instruction(&Instruction::LocalGet(scratch0));
         func.instruction(&Instruction::LocalGet(scratch1));
         func.instruction(&Instruction::I32Const(4));
         func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Const(8));
+        func.instruction(&Instruction::I32Const(12));
         func.instruction(&Instruction::I32Add);
         func.instruction(&Instruction::I32Add);
         func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+    }
+
+    /// Update element at index with bounds check: list_ptr, index, value -> ()
+    pub fn update_element(func: &mut Function, list_ptr: u32, index: u32, value: u32) {
+        // Stack: list_ptr, index, value
+        func.instruction(&Instruction::LocalSet(value));
+        func.instruction(&Instruction::LocalSet(index));
+        func.instruction(&Instruction::LocalSet(list_ptr));
+
+        // bounds check: index < length (at offset 4)
+        func.instruction(&Instruction::LocalGet(index));
+        func.instruction(&Instruction::LocalGet(list_ptr));
+        func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+        func.instruction(&Instruction::I32GeU);
+        func.instruction(&Instruction::If(BlockType::Empty));
+        func.instruction(&Instruction::Unreachable);
+        func.instruction(&Instruction::End);
+
+        // compute address: list_ptr + 12 + (index * 4)
+        func.instruction(&Instruction::LocalGet(list_ptr));
+        func.instruction(&Instruction::LocalGet(index));
+        func.instruction(&Instruction::I32Const(4));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Const(12));
+        func.instruction(&Instruction::I32Add);
+        func.instruction(&Instruction::I32Add);
+
+        func.instruction(&Instruction::LocalGet(value));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
     }
 }
 
@@ -95,7 +132,7 @@ impl ListLayout {
 pub struct DictLayout;
 
 impl DictLayout {
-    /// Allocate dict with capacity: [capacity:i32][size:i32][tombstones:i32][reserved:i32]
+    /// Allocate dict: [type:i32][capacity:i32][size:i32][tombstones:i32][slots...]
     /// Returns: dict_ptr on stack
     pub fn alloc(func: &mut Function, capacity: u32, dict_ptr: u32, counter: u32) {
         let size = 16 + (capacity * 12);
@@ -110,16 +147,20 @@ impl DictLayout {
         func.instruction(&Instruction::End);
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
-        func.instruction(&Instruction::I32Const(capacity as i32));
+        func.instruction(&Instruction::I32Const(TYPE_DICT));
         func.instruction(&Instruction::I32Store(MemArg { offset: 0, align: 2, memory_index: 0 }));
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
-        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32Const(capacity as i32));
         func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
         func.instruction(&Instruction::I32Const(0));
         func.instruction(&Instruction::I32Store(MemArg { offset: 8, align: 2, memory_index: 0 }));
+
+        func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 12, align: 2, memory_index: 0 }));
 
         func.instruction(&Instruction::GlobalGet(HEAP_PTR_GLOBAL));
         func.instruction(&Instruction::LocalSet(dict_ptr));
@@ -199,7 +240,7 @@ impl DictLayout {
         func.instruction(&Instruction::LocalSet(hash));
 
         func.instruction(&Instruction::LocalGet(dict_ptr));
-        func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+        func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
         func.instruction(&Instruction::LocalSet(capacity));
 
         func.instruction(&Instruction::LocalGet(hash));
@@ -245,10 +286,10 @@ impl DictLayout {
 
         func.instruction(&Instruction::LocalGet(dict_ptr));
         func.instruction(&Instruction::LocalGet(dict_ptr));
-        func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
+        func.instruction(&Instruction::I32Load(MemArg { offset: 8, align: 2, memory_index: 0 }));
         func.instruction(&Instruction::I32Const(1));
         func.instruction(&Instruction::I32Add);
-        func.instruction(&Instruction::I32Store(MemArg { offset: 4, align: 2, memory_index: 0 }));
+        func.instruction(&Instruction::I32Store(MemArg { offset: 8, align: 2, memory_index: 0 }));
 
         func.instruction(&Instruction::Br(2));
         func.instruction(&Instruction::End);
@@ -289,7 +330,7 @@ impl DictLayout {
         func.instruction(&Instruction::LocalSet(hash));
 
         func.instruction(&Instruction::LocalGet(dict_ptr));
-        func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+        func.instruction(&Instruction::I32Load(MemArg { offset: 4, align: 2, memory_index: 0 }));
         func.instruction(&Instruction::LocalSet(capacity));
 
         func.instruction(&Instruction::LocalGet(hash));

@@ -164,6 +164,45 @@ impl WasmCodegen {
                     .ok_or_else(|| anyhow::anyhow!("Variable '{}' not in local_map", var))?;
                 func.instruction(&Instruction::LocalSet(*local_idx));
             }
+            IRStmt::SubscriptAssign { target, index, value } => {
+                // generate target, index, value on stack
+                self.generate_expr(func, target, ir_func, gas_temp_local, next_scratch)?;
+                self.generate_expr(func, index, ir_func, gas_temp_local, next_scratch)?;
+                self.generate_expr(func, value, ir_func, gas_temp_local, next_scratch)?;
+
+                let base = *next_scratch;
+                *next_scratch = base + 11;
+
+                // save to locals: target, index, value
+                func.instruction(&Instruction::LocalSet(base + 2));
+                func.instruction(&Instruction::LocalSet(base + 1));
+                func.instruction(&Instruction::LocalSet(base));
+
+                // load type tag from target[0]
+                func.instruction(&Instruction::LocalGet(base));
+                func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+
+                // type == 1 (list)?
+                func.instruction(&Instruction::I32Const(1));
+                func.instruction(&Instruction::I32Eq);
+                func.instruction(&Instruction::If(BlockType::Empty));
+
+                // list branch
+                func.instruction(&Instruction::LocalGet(base));
+                func.instruction(&Instruction::LocalGet(base + 1));
+                func.instruction(&Instruction::LocalGet(base + 2));
+                memory::ListLayout::update_element(func, base + 3, base + 4, base + 5);
+
+                func.instruction(&Instruction::Else);
+
+                // dict branch
+                func.instruction(&Instruction::LocalGet(base));
+                func.instruction(&Instruction::LocalGet(base + 1));
+                func.instruction(&Instruction::LocalGet(base + 2));
+                memory::DictLayout::insert(func, base + 3, base + 4, base + 5, base + 6, base + 7, base + 8, base + 9, base + 10);
+
+                func.instruction(&Instruction::End);
+            }
             IRStmt::Return(expr) => {
                 self.generate_expr(func, expr, ir_func, gas_temp_local, next_scratch)?;
                 func.instruction(&Instruction::Return);

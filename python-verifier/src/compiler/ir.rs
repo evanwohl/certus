@@ -24,6 +24,7 @@ pub struct IRFunction {
 #[derive(Debug, Clone)]
 pub enum IRStmt {
     Assign { var: String, value: IRExpr },
+    SubscriptAssign { target: Box<IRExpr>, index: Box<IRExpr>, value: Box<IRExpr> },
     Return(IRExpr),
     If { cond: IRExpr, then_block: Vec<IRStmt>, else_block: Vec<IRStmt> },
     While { cond: IRExpr, body: Vec<IRStmt> },
