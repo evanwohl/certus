@@ -119,7 +119,7 @@
 
 /* Panels */
 .editorPanel,
-.theatrePanel {
+.theaterPanel {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -282,7 +282,7 @@
   outline-offset: 3px;
 }
 
-/* Theatre */
+/* Theater */
 .placeholder {
   flex: 1;
   display: flex;
@@ -350,7 +350,7 @@
   letter-spacing: 0.05em;
 }
 
-.theatre {
+.theater {
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -436,6 +436,8 @@
 .hashDisplay code {
   color: var(--electric-blue);
   font-weight: 700;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 /* Verifications */
@@ -516,6 +518,43 @@
   font-family: 'Space Mono', monospace;
   font-size: 0.7rem;
   opacity: 0.5;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+/* Verification status messages */
+.verificationComplete,
+.verificationFraud,
+.verificationPending {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  border: 2px solid var(--deep-black);
+  font-family: 'Space Mono', monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 2px;
+}
+
+.verificationComplete {
+  background: var(--success);
+  color: var(--pure-white);
+  border-color: var(--success);
+}
+
+.verificationFraud {
+  background: var(--error);
+  color: var(--pure-white);
+  border-color: var(--error);
+}
+
+.verificationPending {
+  background: var(--pure-white);
+  color: var(--electric-blue);
+  border-color: var(--electric-blue);
+  animation: statusPulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 /* Logs */
@@ -640,7 +679,7 @@
   }
 
   .editorPanel,
-  .theatrePanel {
+  .theaterPanel {
     height: auto;
     min-height: 60vh;
     overflow: visible;
@@ -736,6 +775,15 @@
 
   .hashDisplay {
     font-size: 0.65rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+    width: 100%;
+  }
+
+  .hashDisplay code {
+    font-size: 0.6rem;
+    line-height: 1.4;
   }
 
   .verifications {
@@ -782,6 +830,13 @@
     flex-direction: column;
     align-items: flex-start;
     gap: 0.5rem;
+    padding: 0.75rem;
+  }
+
+  .verificationHash {
+    font-size: 0.6rem;
+    line-height: 1.4;
+    width: 100%;
   }
 
   .logEntry {

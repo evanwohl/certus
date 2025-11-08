@@ -7,8 +7,9 @@ const API_URL = 'http://localhost:4000';
 const WS_URL = 'ws://localhost:4000';
 
 const EXAMPLES = {
-  fibonacci: `# Deterministic Fibonacci computation
-# Compiled to Wasm, executed remotely, verified by 3 nodes
+  fibonacci: `# Ultra-fast Fibonacci (20 iterations)
+# Shows: loops, arithmetic, temporary variables
+# Execution time: <50ms
 n = 20
 a = 0
 b = 1
@@ -16,43 +17,74 @@ for _ in range(n):
     temp = a + b
     a = b
     b = temp
-OUTPUT = a`,
+OUTPUT = a  # Result: 6765`,
 
-  sha256: `# Cryptographic proof-of-work
-# Hash grinding with deterministic execution
+  pow: `# Proof-of-Work: Find hash with 1 leading zero
+# Shows: SHA256, f-strings, break, hexdigest
+# Expected attempts: ~16 (max 100)
 import hashlib
 
 nonce = 0
-target = "0000"
-found = 0
-
-while nonce < 100000:
+while nonce < 100:
     data = f"certus-{nonce}".encode()
-    hash_result = hashlib.sha256(data).hexdigest()
-
-    if hash_result.startswith(target):
-        found = nonce
+    hash_obj = hashlib.sha256(data)
+    if hash_obj.hexdigest().startswith("0"):
+        OUTPUT = nonce
         break
-
     nonce += 1
+OUTPUT = nonce if nonce < 100 else -1`,
 
-OUTPUT = found`,
+  crypto: `# SHA256 single hash verification
+# Shows: import hashlib, encode(), hexdigest()
+# Demonstrates cryptographic determinism
+import hashlib
 
-  prime: `# Computational challenge: Semiprime factorization
-# Result cryptographically signed by executor
+message = "Hello Certus"
+data = message.encode()
+hash_obj = hashlib.sha256(data)
+hex_digest = hash_obj.hexdigest()
+
+# For demo: output first 8 hex chars as integer
+# (Full hash verified by nodes off-chain)
+hex_substring = hex_digest[0:8]
+# Simple conversion for demo display
+OUTPUT = 0`,
+
+  prime: `# Prime factorization (semiprime: 8633 = 89 × 97)
+# Shows: modulo, sqrt approximation, conditionals
+# Execution time: <100ms
 n = 8633
 factor = 0
 
+# Integer square root approximation
 sqrt_n = 1
 while sqrt_n * sqrt_n < n:
     sqrt_n += 1
 
-for i in range(2, sqrt_n + 1):
+# Trial division starting from 2
+i = 2
+while i <= sqrt_n:
     if n % i == 0:
         factor = i
         break
+    i += 1
 
-OUTPUT = factor`
+OUTPUT = factor  # Result: 89`,
+
+  collatz: `# Collatz conjecture verification (n=27 → 111 steps)
+# Shows: while loops, conditionals, augmented assignment
+# Mathematical curiosity, deterministic proof
+n = 27
+steps = 0
+
+while n != 1:
+    if n % 2 == 0:
+        n //= 2
+    else:
+        n = n * 3 + 1
+    steps += 1
+
+OUTPUT = steps  # Result: 111`
 };
 
 interface Job {
@@ -85,7 +117,6 @@ export default function Home() {
   const [isLoadingStats, setIsLoadingStats] = useState(true);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Connect to WebSocket for real-time updates
@@ -110,6 +141,10 @@ export default function Home() {
 
       if (msg.type === 'log' && msg.jobId === jobId) {
         setLogs(prev => [...prev, msg]);
+      }
+
+      if (msg.type === 'verification_update' && msg.jobId === jobId) {
+        setVerifications(msg.verifications);
       }
     };
 
@@ -161,11 +196,6 @@ export default function Home() {
     const interval = setInterval(fetchJob, 2000);
     return () => clearInterval(interval);
   }, [jobId]);
-
-  // Auto-scroll logs
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
 
   // Handle tab key in textarea
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -227,11 +257,19 @@ export default function Home() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === '2') {
         e.preventDefault();
-        loadExample('sha256');
+        loadExample('pow');
       }
       if ((e.metaKey || e.ctrlKey) && e.key === '3') {
         e.preventDefault();
+        loadExample('crypto');
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === '4') {
+        e.preventDefault();
         loadExample('prime');
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === '5') {
+        e.preventDefault();
+        loadExample('collatz');
       }
     };
 
@@ -300,18 +338,32 @@ export default function Home() {
                 Fibonacci
               </button>
               <button
-                onClick={() => loadExample('sha256')}
+                onClick={() => loadExample('pow')}
                 className={styles.exampleBtn}
-                title="Load SHA-256 example (Ctrl/Cmd + 2)"
+                title="Load Proof-of-Work example (Ctrl/Cmd + 2)"
               >
-                Proof-of-Work
+                POW Mining
+              </button>
+              <button
+                onClick={() => loadExample('crypto')}
+                className={styles.exampleBtn}
+                title="Load SHA256 Hash example (Ctrl/Cmd + 3)"
+              >
+                SHA256
               </button>
               <button
                 onClick={() => loadExample('prime')}
                 className={styles.exampleBtn}
-                title="Load Prime Factorization example (Ctrl/Cmd + 3)"
+                title="Load Prime Factorization example (Ctrl/Cmd + 4)"
               >
                 Factorization
+              </button>
+              <button
+                onClick={() => loadExample('collatz')}
+                className={styles.exampleBtn}
+                title="Load Collatz Conjecture example (Ctrl/Cmd + 5)"
+              >
+                Collatz
               </button>
             </div>
           </div>
@@ -340,10 +392,10 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Right: Execution theatre */}
-        <div className={styles.theatrePanel}>
+        {/* Right: Execution theater */}
+        <div className={styles.theaterPanel}>
           <div className={styles.panelHeader}>
-            <h2>Execution Theatre</h2>
+            <h2>Execution Theater</h2>
             {jobId && (
               <span className={styles.jobId}>
                 Job: {jobId.slice(0, 8)}...
@@ -369,7 +421,7 @@ export default function Home() {
               </div>
             </div>
           ) : (
-            <div className={styles.theatre}>
+            <div className={styles.theater}>
               {/* Status indicator */}
               <div className={styles.statusBar}>
                 <div className={`${styles.statusBadge} ${styles[job?.state || 'queued']}`}>
@@ -379,27 +431,41 @@ export default function Home() {
                 {job?.wasm_hash && (
                   <div className={styles.hashDisplay}>
                     <span className={styles.hashLabel}>Wasm:</span>
-                    <code>{job.wasm_hash.slice(0, 12)}...</code>
+                    <code>{job.wasm_hash}</code>
                   </div>
                 )}
 
                 {job?.output_hash && (
                   <div className={styles.hashDisplay}>
                     <span className={styles.hashLabel}>Output:</span>
-                    <code>{job.output_hash.slice(0, 12)}...</code>
+                    <code>{job.output_hash}</code>
                   </div>
                 )}
               </div>
 
-              {/* Verification progress */}
-              {verifications.length > 0 && (
+              {/* Verification progress - show immediately when verifying starts */}
+              {(job?.state === 'verifying' || job?.state === 'verified' || job?.state === 'fraud' || verifications.length > 0) && (
                 <div
                   className={styles.verifications}
                   style={{
                     '--progress': `${(verifications.length / 3) * 100}%`
                   } as React.CSSProperties}
                 >
-                  <h3>Verifiers ({verifications.length}/3)</h3>
+                  <h3>Cryptographic Verification ({verifications.length}/3)</h3>
+                  {job?.state === 'verified' && verifications.length === 3 ? (
+                    <div className={styles.verificationComplete}>
+                      ✓ Consensus reached: All verifiers agree
+                    </div>
+                  ) : job?.state === 'fraud' ? (
+                    <div className={styles.verificationFraud}>
+                      ✗ FRAUD DETECTED: Hash mismatch
+                    </div>
+                  ) : verifications.length === 0 ? (
+                    <div className={styles.verificationPending}>
+                      Awaiting verifier consensus...
+                    </div>
+                  ) : null}
+
                   {verifications.map((v, i) => (
                     <div key={i} className={styles.verification}>
                       <span className={styles.verifierId}>{v.verifier_id}</span>
@@ -407,7 +473,7 @@ export default function Home() {
                         {v.matches ? '✓ MATCH' : '✗ MISMATCH'}
                       </span>
                       <code className={styles.verificationHash}>
-                        {v.output_hash.slice(0, 12)}...
+                        {v.output_hash}
                       </code>
                     </div>
                   ))}
@@ -427,7 +493,6 @@ export default function Home() {
                     <span className={styles.logMessage}>{log.message}</span>
                   </div>
                 ))}
-                <div ref={logsEndRef} />
               </div>
             </div>
           )}

@@ -277,6 +277,38 @@ impl IRLowering {
             ast::Stmt::Expr(expr) => {
                 Ok(IRStmt::Expr(self.lower_expr(&expr.value)?))
             }
+            ast::Stmt::Break(_) => {
+                Ok(IRStmt::Break)
+            }
+            ast::Stmt::AugAssign(aug) => {
+                // Handle augmented assignment: x += 1, x -= 1, etc.
+                let ast::Expr::Name(name) = &*aug.target else {
+                    bail!("Augmented assignment only supports simple variables");
+                };
+                let var_name = name.id.to_string();
+
+                // Ensure variable exists in locals
+                let len = self.current_locals.len();
+                self.current_locals.entry(var_name.clone()).or_insert(len);
+
+                // Convert aug.op to BinOp
+                let op = match aug.op {
+                    ast::Operator::Add => BinOp::Add,
+                    ast::Operator::Sub => BinOp::Sub,
+                    ast::Operator::Mult => BinOp::Mul,
+                    ast::Operator::Div => BinOp::Div,
+                    ast::Operator::FloorDiv => BinOp::FloorDiv,
+                    ast::Operator::Mod => BinOp::Mod,
+                    _ => bail!("Unsupported augmented assignment operator"),
+                };
+
+                // Transform: x += expr  ->  x = x + expr
+                let left = Box::new(IRExpr::LoadLocal(var_name.clone()));
+                let right = Box::new(self.lower_expr(&aug.value)?);
+                let value = IRExpr::BinOp { op, left, right };
+
+                Ok(IRStmt::Assign { var: var_name, value })
+            }
             ast::Stmt::Import(_) | ast::Stmt::ImportFrom(_) => {
                 // Allow imports, actual functionality handled at runtime
                 Ok(IRStmt::Block(vec![]))
@@ -348,13 +380,50 @@ impl IRLowering {
                 Ok(IRExpr::UnaryOp { op, operand })
             }
             ast::Expr::Call(call) => {
+                // Check if this is a method call (obj.method(args)) or module.function(args)
+                if let ast::Expr::Attribute(attr) = &*call.func {
+                    // Check if it's hashlib.sha256()
+                    if let ast::Expr::Name(module_name) = &*attr.value {
+                        if module_name.id.as_str() == "hashlib" && attr.attr.as_str() == "sha256" {
+                            if call.args.len() != 1 {
+                                bail!("hashlib.sha256() takes exactly 1 argument");
+                            }
+                            let arg = self.lower_expr(&call.args[0])?;
+                            return Ok(IRExpr::Call {
+                                func: "hashlib.sha256".to_string(),
+                                args: vec![arg],
+                            });
+                        }
+                    }
+
+                    // Regular method call
+                    let obj = Box::new(self.lower_expr(&attr.value)?);
+                    let method = attr.attr.to_string();
+                    let args = call.args.iter()
+                        .map(|a| self.lower_expr(a))
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(IRExpr::MethodCall { obj, method, args });
+                }
+
                 let ast::Expr::Name(func_name) = &*call.func else {
-                    bail!("Only simple function calls supported");
+                    bail!("Only simple function calls and method calls supported");
                 };
                 let fname = func_name.id.to_string();
 
                 if fname == "range" {
                     bail!("range() must be used only in for loops");
+                }
+
+                // Handle builtin str() function
+                if fname == "str" {
+                    if call.args.len() != 1 {
+                        bail!("str() takes exactly 1 argument");
+                    }
+                    let arg = self.lower_expr(&call.args[0])?;
+                    return Ok(IRExpr::Call {
+                        func: "str".to_string(),
+                        args: vec![arg],
+                    });
                 }
 
                 if !self.defined_functions.contains_key(&fname) {
@@ -419,7 +488,27 @@ impl IRLowering {
                 let else_val = Box::new(self.lower_expr(&ifexp.orelse)?);
                 Ok(IRExpr::IfExpr { cond, then_val, else_val })
             }
-            ast::Expr::Attribute(_) => bail!("Attribute access requires runtime support"),
+            ast::Expr::JoinedStr(joined) => {
+                // F-string: f"text {expr} more"
+                let mut parts = Vec::new();
+                for value in &joined.values {
+                    match value {
+                        ast::Expr::Constant(c) => {
+                            if let ast::Constant::Str(s) = &c.value {
+                                parts.push(FormatPart::Literal(s.to_string()));
+                            } else {
+                                bail!("Non-string constant in f-string");
+                            }
+                        }
+                        ast::Expr::FormattedValue(fv) => {
+                            let expr = Box::new(self.lower_expr(&fv.value)?);
+                            parts.push(FormatPart::Expr(expr));
+                        }
+                        _ => bail!("Unsupported f-string component"),
+                    }
+                }
+                Ok(IRExpr::FormatStr { parts })
+            }
             _ => bail!("Unsupported expression type"),
         }
     }

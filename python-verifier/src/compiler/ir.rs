@@ -29,6 +29,7 @@ pub enum IRStmt {
     If { cond: IRExpr, then_block: Vec<IRStmt>, else_block: Vec<IRStmt> },
     While { cond: IRExpr, body: Vec<IRStmt> },
     For { var: String, iter: IRExpr, body: Vec<IRStmt> },
+    Break,
     Expr(IRExpr),
     Block(Vec<IRStmt>),
 }
@@ -61,6 +62,23 @@ pub enum IRExpr {
         then_val: Box<IRExpr>,
         else_val: Box<IRExpr>,
     },
+    // Method call: obj.method(args)
+    MethodCall {
+        obj: Box<IRExpr>,
+        method: String,
+        args: Vec<IRExpr>,
+    },
+    // Format string: f"text {expr}"
+    FormatStr {
+        parts: Vec<FormatPart>,
+    },
+}
+
+// Format string part: either literal text or expression
+#[derive(Debug, Clone)]
+pub enum FormatPart {
+    Literal(String),
+    Expr(Box<IRExpr>),
 }
 
 // Binary operators (arithmetic and comparison)

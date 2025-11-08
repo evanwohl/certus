@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use wasm_encoder::*;
 use std::collections::BTreeMap;
 
@@ -107,7 +107,9 @@ impl WasmCodegen {
         // In WASM, parameters are the first N locals
         // We only declare additional locals beyond parameters
         let param_count = func._params.len() as u32;
-        let additional_locals = func.locals.len() as u32 - param_count + func.temp_locals;
+        // Allocate enough scratch space for all operations (SHA256 needs ~160 locals)
+        let scratch_locals = func.temp_locals.max(200);
+        let additional_locals = func.locals.len() as u32 - param_count + scratch_locals;
 
         let mut wasm_func = if additional_locals > 0 {
             Function::new(vec![(additional_locals, ValType::I32)])
@@ -116,7 +118,7 @@ impl WasmCodegen {
         };
 
         // Gas temp local is the last scratch local
-        let gas_temp_local = func.locals.len() as u32 + func.temp_locals - 1;
+        let gas_temp_local = func.locals.len() as u32 + scratch_locals - 1;
 
         self.meter_gas(&mut wasm_func, 10, gas_temp_local);
 
@@ -158,6 +160,10 @@ impl WasmCodegen {
     }
 
     fn generate_stmt_with_scratch(&mut self, func: &mut Function, stmt: &IRStmt, ir_func: &IRFunction, gas_temp_local: u32, next_scratch: &mut u32) -> Result<()> {
+        self.generate_stmt_with_loop_depth(func, stmt, ir_func, gas_temp_local, next_scratch, 0)
+    }
+
+    fn generate_stmt_with_loop_depth(&mut self, func: &mut Function, stmt: &IRStmt, ir_func: &IRFunction, gas_temp_local: u32, next_scratch: &mut u32, loop_depth: u32) -> Result<()> {
         match stmt {
             IRStmt::Assign { var, value } => {
                 self.generate_expr(func, value, ir_func, gas_temp_local, next_scratch)?;
@@ -212,12 +218,12 @@ impl WasmCodegen {
                 self.generate_expr(func, cond, ir_func, gas_temp_local, next_scratch)?;
                 func.instruction(&Instruction::If(BlockType::Empty));
                 for s in then_block {
-                    self.generate_stmt_with_scratch(func, s, ir_func, gas_temp_local, next_scratch)?;
+                    self.generate_stmt_with_loop_depth(func, s, ir_func, gas_temp_local, next_scratch, loop_depth + 1)?;
                 }
                 if !else_block.is_empty() {
                     func.instruction(&Instruction::Else);
                     for s in else_block {
-                        self.generate_stmt_with_scratch(func, s, ir_func, gas_temp_local, next_scratch)?;
+                        self.generate_stmt_with_loop_depth(func, s, ir_func, gas_temp_local, next_scratch, loop_depth + 1)?;
                     }
                 }
                 func.instruction(&Instruction::End);
@@ -230,7 +236,8 @@ impl WasmCodegen {
                 func.instruction(&Instruction::I32Eqz);
                 func.instruction(&Instruction::BrIf(1));
                 for s in body {
-                    self.generate_stmt_with_scratch(func, s, ir_func, gas_temp_local, next_scratch)?;
+                    // Start with loop_depth = 0 for loop body, increments for nested control structures
+                    self.generate_stmt_with_loop_depth(func, s, ir_func, gas_temp_local, next_scratch, 0)?;
                 }
                 func.instruction(&Instruction::Br(0));
                 func.instruction(&Instruction::End);
@@ -260,7 +267,8 @@ impl WasmCodegen {
                 func.instruction(&Instruction::LocalSet(*loop_var));
                 for s in body {
                     let mut body_scratch = body_scratch_base;
-                    self.generate_stmt_with_scratch(func, s, ir_func, gas_temp_local, &mut body_scratch)?;
+                    // Start with loop_depth = 0 for loop body, increments for nested control structures
+                    self.generate_stmt_with_loop_depth(func, s, ir_func, gas_temp_local, &mut body_scratch, 0)?;
                 }
 
                 func.instruction(&Instruction::LocalGet(counter));
@@ -272,13 +280,19 @@ impl WasmCodegen {
                 func.instruction(&Instruction::End);
                 func.instruction(&Instruction::End);
             }
+            IRStmt::Break => {
+                // Break out of innermost loop
+                // loop_depth tracks nested control structures (If, etc.)
+                // We need to break to the Block surrounding the Loop, which is at depth loop_depth + 1
+                func.instruction(&Instruction::Br(loop_depth + 1));
+            }
             IRStmt::Expr(expr) => {
                 self.generate_expr(func, expr, ir_func, gas_temp_local, next_scratch)?;
                 func.instruction(&Instruction::Drop);
             }
             IRStmt::Block(stmts) => {
                 for s in stmts {
-                    self.generate_stmt_with_scratch(func, s, ir_func, gas_temp_local, next_scratch)?;
+                    self.generate_stmt_with_loop_depth(func, s, ir_func, gas_temp_local, next_scratch, loop_depth)?;
                 }
             }
         }
@@ -397,9 +411,10 @@ impl WasmCodegen {
 
                         match op {
                             BinOp::FloorDiv => {
-                        let scratch0 = ir_func.locals.len() as u32;
+                        let scratch0 = *next_scratch;
                         let scratch1 = scratch0 + 1;
                         let scratch2 = scratch0 + 2;
+                        *next_scratch = scratch0 + 3;
 
                         func.instruction(&Instruction::LocalSet(scratch1));
                         func.instruction(&Instruction::LocalSet(scratch0));
@@ -442,9 +457,10 @@ impl WasmCodegen {
                         // Python modulo: result has same sign as divisor
                         // if C_rem and divisor have different signs: result = C_rem + divisor
                         // else: result = C_rem
-                        let scratch0 = ir_func.locals.len() as u32;
+                        let scratch0 = *next_scratch;
                         let scratch1 = scratch0 + 1;
                         let scratch2 = scratch0 + 2;
+                        *next_scratch = scratch0 + 3;
 
                         // Store operands
                         func.instruction(&Instruction::LocalSet(scratch1));  // b
@@ -509,6 +525,36 @@ impl WasmCodegen {
                 }
             }
             IRExpr::Call { func: fname, args } => {
+                // Handle builtin str() function
+                if fname == "str" {
+                    if args.len() != 1 {
+                        bail!("str() takes exactly 1 argument");
+                    }
+                    let base = *next_scratch;
+                    *next_scratch = base + 8;
+
+                    self.generate_expr(func, &args[0], ir_func, gas_temp_local, next_scratch)?;
+                    memory::StringLayout::from_int(func, base, base + 1, base + 2, base + 3, base + 4, base + 5, base + 6, base + 7);
+
+                    *next_scratch = base;
+                    return Ok(());
+                }
+
+                // Handle hashlib.sha256() function
+                if fname == "hashlib.sha256" {
+                    if args.len() != 1 {
+                        bail!("hashlib.sha256() takes exactly 1 argument");
+                    }
+                    let base = *next_scratch;
+                    *next_scratch = base + 160; // SHA256 needs 98 locals (base + 97) + message schedule array
+
+                    self.generate_expr(func, &args[0], ir_func, gas_temp_local, next_scratch)?;
+                    memory::sha256(func, base);
+
+                    *next_scratch = base;
+                    return Ok(());
+                }
+
                 for arg in args {
                     self.generate_expr(func, arg, ir_func, gas_temp_local, next_scratch)?;
                 }
@@ -662,6 +708,136 @@ impl WasmCodegen {
                 func.instruction(&Instruction::Else);
                 self.generate_expr(func, else_val, ir_func, gas_temp_local, next_scratch)?;
                 func.instruction(&Instruction::End);
+            }
+            IRExpr::MethodCall { obj, method, args } => {
+                let saved_scratch = *next_scratch;
+
+                // Generate object expression
+                self.generate_expr(func, obj, ir_func, gas_temp_local, next_scratch)?;
+                let obj_local = saved_scratch;
+                func.instruction(&Instruction::LocalSet(obj_local));
+
+                // Generate args
+                let mut arg_locals = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    self.generate_expr(func, arg, ir_func, gas_temp_local, next_scratch)?;
+                    let arg_local = saved_scratch + 1 + i as u32;
+                    func.instruction(&Instruction::LocalSet(arg_local));
+                    arg_locals.push(arg_local);
+                }
+
+                *next_scratch = saved_scratch + 1 + args.len() as u32;
+
+                // Dispatch to specific method implementation
+                match method.as_str() {
+                    "encode" => {
+                        if !args.is_empty() {
+                            bail!("encode() takes no arguments");
+                        }
+                        // Call StringLayout::encode (converts string to bytes)
+                        func.instruction(&Instruction::LocalGet(obj_local));
+                        let base = *next_scratch;
+                        *next_scratch = base + 4;
+                        memory::BytesLayout::from_string(func, base, base + 1, base + 2, base + 3);
+                    }
+                    "startswith" => {
+                        if args.len() != 1 {
+                            bail!("startswith() takes exactly 1 argument");
+                        }
+                        // String prefix check
+                        func.instruction(&Instruction::LocalGet(obj_local));
+                        func.instruction(&Instruction::LocalGet(arg_locals[0]));
+                        let base = *next_scratch;
+                        *next_scratch = base + 6;
+                        memory::StringLayout::startswith(func, base, base + 1, base + 2, base + 3, base + 4, base + 5);
+                    }
+                    "hexdigest" => {
+                        if !args.is_empty() {
+                            bail!("hexdigest() takes no arguments");
+                        }
+                        // Convert hash bytes to hex string
+                        func.instruction(&Instruction::LocalGet(obj_local));
+                        let base = *next_scratch;
+                        *next_scratch = base + 4;
+                        memory::BytesLayout::hexdigest(func, base, base + 1, base + 2, base + 3);
+                    }
+                    _ => bail!("Unknown method: {}", method),
+                }
+
+                *next_scratch = saved_scratch;
+            }
+            IRExpr::FormatStr { parts } => {
+                let saved_scratch = *next_scratch;
+
+                // Generate all parts, converting to strings
+                let mut part_locals = Vec::new();
+                for (i, part) in parts.iter().enumerate() {
+                    let part_local = saved_scratch + i as u32;
+                    match part {
+                        FormatPart::Literal(s) => {
+                            // String literal
+                            memory::StringLayout::alloc(func, s.as_bytes());
+                        }
+                        FormatPart::Expr(expr) => {
+                            // Evaluate expression
+                            self.generate_expr(func, expr, ir_func, gas_temp_local, next_scratch)?;
+
+                            // Check if result is already a string (heap pointer with type tag 3)
+                            let val_local = saved_scratch + parts.len() as u32 + i as u32;
+                            func.instruction(&Instruction::LocalTee(val_local));
+
+                            // Check if heap pointer (>= 1024)
+                            func.instruction(&Instruction::LocalGet(val_local));
+                            func.instruction(&Instruction::I32Const(1024));
+                            func.instruction(&Instruction::I32GeU);
+
+                            // Check if type tag == 3 (string)
+                            func.instruction(&Instruction::LocalGet(val_local));
+                            func.instruction(&Instruction::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
+                            func.instruction(&Instruction::I32Const(3)); // TYPE_STRING
+                            func.instruction(&Instruction::I32Eq);
+
+                            func.instruction(&Instruction::I32And);
+
+                            // If already string, use as-is, else convert with str()
+                            func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                            func.instruction(&Instruction::LocalGet(val_local));
+                            func.instruction(&Instruction::Else);
+                            func.instruction(&Instruction::LocalGet(val_local));
+                            let base = *next_scratch;
+                            *next_scratch = base + 8;
+                            memory::StringLayout::from_int(func, base, base + 1, base + 2, base + 3, base + 4, base + 5, base + 6, base + 7);
+                            *next_scratch = saved_scratch + parts.len() as u32 * 2;
+                            func.instruction(&Instruction::End);
+                        }
+                    }
+                    func.instruction(&Instruction::LocalSet(part_local));
+                    part_locals.push(part_local);
+                }
+
+                // Concatenate all parts left-to-right
+                if part_locals.is_empty() {
+                    // Empty f-string -> empty string
+                    memory::StringLayout::alloc(func, &[]);
+                } else if part_locals.len() == 1 {
+                    // Single part
+                    func.instruction(&Instruction::LocalGet(part_locals[0]));
+                } else {
+                    // Multiple parts: concat(concat(...concat(p0, p1), p2), ..., pN)
+                    func.instruction(&Instruction::LocalGet(part_locals[0]));
+                    func.instruction(&Instruction::LocalGet(part_locals[1]));
+
+                    let base = saved_scratch + parts.len() as u32 * 2;
+                    *next_scratch = base + 7;
+                    memory::StringLayout::concat(func, base, base + 1, base + 2, base + 3, base + 4, base + 5, base + 6);
+
+                    for i in 2..part_locals.len() {
+                        func.instruction(&Instruction::LocalGet(part_locals[i]));
+                        memory::StringLayout::concat(func, base, base + 1, base + 2, base + 3, base + 4, base + 5, base + 6);
+                    }
+                }
+
+                *next_scratch = saved_scratch;
             }
         }
         Ok(())

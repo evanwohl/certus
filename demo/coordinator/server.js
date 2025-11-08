@@ -84,7 +84,7 @@ function addLog(jobId, message, level = 'info') {
     jobId,
     message,
     level,
-    timestamp: Date.now()
+    created_at: Date.now()
   });
 }
 
@@ -150,7 +150,7 @@ wss.on('connection', (ws) => {
         wasm_hash: wasmHash
       });
 
-      addLog(jobId, `Compiled to Wasm (${wasmBytes.length} bytes, hash: ${wasmHash.slice(0, 12)}...)`);
+      addLog(jobId, `Compiled to Wasm (${wasmBytes.length} bytes)\nSHA256: ${wasmHash}`);
 
       // Send to executor (include Python code since our CLI needs it)
       const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
@@ -175,7 +175,7 @@ wss.on('connection', (ws) => {
         executor_sig: signature
       });
 
-      addLog(jobId, `Execution complete (output: ${outputHash.slice(0, 12)}...)`);
+      addLog(jobId, `Execution complete\nOutput SHA256: ${outputHash}`);
 
       if (stdout && stdout.length > 0) {
         stdout.forEach(line => addLog(jobId, `  ${line}`, 'stdout'));
@@ -208,11 +208,17 @@ wss.on('connection', (ws) => {
       stmt.run(jobId, nodeId, outputHash, signature, matches ? 1 : 0, Date.now());
 
       const matchStr = matches ? '✓ MATCH' : '✗ MISMATCH';
-      addLog(jobId, `Verifier ${nodeId}: ${matchStr} (${outputHash.slice(0, 12)}...)`);
+      addLog(jobId, `Verifier ${nodeId}: ${matchStr}\nHash: ${outputHash}`);
+
+      // Broadcast verification update immediately
+      const verifications = db.prepare('SELECT * FROM verifications WHERE job_id = ?').all(jobId);
+      broadcastToFrontends({
+        type: 'verification_update',
+        jobId,
+        verifications
+      });
 
       // Check if we have enough verifications
-      const verifications = db.prepare('SELECT * FROM verifications WHERE job_id = ?').all(jobId);
-
       if (verifications.length >= 3) {
         const allMatch = verifications.every(v => v.matches === 1);
 
