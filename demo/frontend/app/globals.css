@@ -1,0 +1,126 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+
+#__next {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+:root {
+  --electric-blue: oklch(0.45 0.25 250);
+  --pure-white: oklch(0.99 0 0);
+  --deep-black: oklch(0.08 0 0);
+  --soft-gray: oklch(0.96 0 0);
+  --success: oklch(0.55 0.20 145);
+  --error: oklch(0.55 0.25 25);
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--pure-white);
+  color: var(--deep-black);
+  line-height: 1.5;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--soft-gray);
+  border-left: 2px solid var(--deep-black);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--deep-black);
+  border: 2px solid var(--soft-gray);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--electric-blue);
+  border-color: var(--pure-white);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--deep-black) var(--soft-gray);
+}
+
+h1, h2, h3 {
+  font-weight: 900;
+  letter-spacing: -0.045em;
+  line-height: 0.9;
+}
+
+h1 {
+  font-size: 3rem;
+}
+
+h2 {
+  font-size: 1.5rem;
+}
+
+code, pre {
+  font-family: 'Space Mono', 'Courier New', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  padding: 0;
+}
+
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.geometric-bg {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  border: 2px solid var(--soft-gray);
+  pointer-events: none;
+  animation: rotate 20s linear infinite;
+  will-change: transform;
+}
+
+@media (max-width: 1200px) {
+  html,
+  body {
+    position: static;
+    overflow: auto;
+  }
+}

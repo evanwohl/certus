@@ -1,0 +1,60 @@
+{
+  "challenges": [
+    {
+      "id": "fibonacci",
+      "name": "Fibonacci Sequence",
+      "difficulty": "beginner",
+      "description": "Calculate the Nth Fibonacci number",
+      "code": "def solve():\n    \"\"\"Calculate Fibonacci number\"\"\"\n    n = 20\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return {\"result\": a, \"n\": n}"
+    },
+    {
+      "id": "sha256",
+      "name": "Hash Mining",
+      "difficulty": "beginner",
+      "description": "Find a nonce that produces a hash with N leading zeros",
+      "code": "def solve():\n    \"\"\"Find hash with leading zeros\"\"\"\n    import hashlib\n\n    nonce = 0\n    target = \"0000\"\n\n    while nonce < 100000:\n        data = f\"certus-{nonce}\".encode()\n        hash_result = hashlib.sha256(data).hexdigest()\n\n        if hash_result.startswith(target):\n            return {\"nonce\": nonce, \"hash\": hash_result}\n\n        nonce += 1\n\n    return {\"error\": \"not found\"}"
+    },
+    {
+      "id": "prime_factor",
+      "name": "Prime Factorization",
+      "difficulty": "beginner",
+      "description": "Factor a semiprime into its two prime factors",
+      "code": "def solve():\n    \"\"\"Factor a semiprime\"\"\"\n    n = 8633  # 89 × 97\n\n    for i in range(2, int(n ** 0.5) + 1):\n        if n % i == 0:\n            return {\n                \"n\": n,\n                \"factor1\": i,\n                \"factor2\": n // i\n            }\n\n    return {\"error\": \"prime number\"}"
+    },
+    {
+      "id": "collatz",
+      "name": "Collatz Conjecture",
+      "difficulty": "intermediate",
+      "description": "Calculate the Collatz sequence length for a given number",
+      "code": "def solve():\n    \"\"\"Collatz conjecture sequence\"\"\"\n    n = 27\n    steps = 0\n    sequence = [n]\n\n    while n != 1:\n        if n % 2 == 0:\n            n = n // 2\n        else:\n            n = 3 * n + 1\n        sequence.append(n)\n        steps += 1\n\n    return {\n        \"start\": 27,\n        \"steps\": steps,\n        \"max_value\": max(sequence)\n    }"
+    },
+    {
+      "id": "monte_carlo_pi",
+      "name": "Monte Carlo π",
+      "difficulty": "intermediate",
+      "description": "Estimate π using Monte Carlo method",
+      "code": "def solve():\n    \"\"\"Estimate pi using Monte Carlo\"\"\"\n    n = 10000\n    inside = 0\n\n    # Deterministic pseudo-random (Linear Congruential Generator)\n    seed = 12345\n    a = 1103515245\n    c = 12345\n    m = 2**31\n\n    for _ in range(n):\n        seed = (a * seed + c) % m\n        x = (seed / m) * 2 - 1\n\n        seed = (a * seed + c) % m\n        y = (seed / m) * 2 - 1\n\n        if x*x + y*y <= 1:\n            inside += 1\n\n    pi_estimate = 4 * inside / n\n\n    return {\n        \"iterations\": n,\n        \"pi_estimate\": pi_estimate,\n        \"error\": abs(pi_estimate - 3.14159265359)\n    }"
+    },
+    {
+      "id": "mandelbrot",
+      "name": "Mandelbrot Set",
+      "difficulty": "intermediate",
+      "description": "Calculate iterations for points in the Mandelbrot set",
+      "code": "def solve():\n    \"\"\"Sample Mandelbrot set\"\"\"\n    max_iter = 100\n    points = [\n        (-0.5, 0.0),\n        (0.0, 0.0),\n        (-0.75, 0.1),\n        (0.25, 0.0)\n    ]\n\n    results = []\n\n    for x0, y0 in points:\n        x, y = 0.0, 0.0\n        iteration = 0\n\n        while x*x + y*y <= 4 and iteration < max_iter:\n            xtemp = x*x - y*y + x0\n            y = 2*x*y + y0\n            x = xtemp\n            iteration += 1\n\n        results.append({\n            \"point\": [x0, y0],\n            \"iterations\": iteration,\n            \"in_set\": iteration == max_iter\n        })\n\n    return {\"results\": results, \"max_iter\": max_iter}"
+    },
+    {
+      "id": "sieve_eratosthenes",
+      "name": "Sieve of Eratosthenes",
+      "difficulty": "intermediate",
+      "description": "Find all prime numbers up to N",
+      "code": "def solve():\n    \"\"\"Find primes using Sieve of Eratosthenes\"\"\"\n    n = 1000\n    is_prime = [True] * (n + 1)\n    is_prime[0] = is_prime[1] = False\n\n    for i in range(2, int(n**0.5) + 1):\n        if is_prime[i]:\n            for j in range(i*i, n + 1, i):\n                is_prime[j] = False\n\n    primes = [i for i in range(n + 1) if is_prime[i]]\n\n    return {\n        \"limit\": n,\n        \"count\": len(primes),\n        \"largest\": primes[-1] if primes else 0,\n        \"sum\": sum(primes)\n    }"
+    },
+    {
+      "id": "matrix_multiply",
+      "name": "Matrix Multiplication",
+      "difficulty": "intermediate",
+      "description": "Multiply two matrices",
+      "code": "def solve():\n    \"\"\"Matrix multiplication\"\"\"\n    # 3x3 matrices\n    A = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]\n    B = [[9, 8, 7], [6, 5, 4], [3, 2, 1]]\n\n    # Result matrix\n    C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]\n\n    for i in range(3):\n        for j in range(3):\n            for k in range(3):\n                C[i][j] += A[i][k] * B[k][j]\n\n    return {\"result\": C, \"trace\": sum(C[i][i] for i in range(3))}"
+    }
+  ]
+}

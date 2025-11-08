@@ -1,0 +1,27 @@
+{
+  "name": "certus-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node scripts/launch.js",
+    "coordinator": "node coordinator/server.js",
+    "executor": "node executor/node.js",
+    "verifier": "node verifier/node.js",
+    "frontend": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "clean": "rm -rf coordinator/data verifier-*/data"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.0.0",
+    "ws": "^8.14.2",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "better-sqlite3": "^9.2.2",
+    "uuid": "^9.0.1",
+    "chalk": "^4.1.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
