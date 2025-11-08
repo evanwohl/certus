@@ -254,11 +254,18 @@ wss.on('connection', (ws) => {
       // Get all verifications
       const verifications = db.prepare('SELECT * FROM verifications WHERE job_id = ?').all(jobId);
 
-      // Check if we have enough verifications FIRST
-      let finalState = null;
+      // Broadcast verifications immediately (before consensus check)
+      broadcastToFrontends({
+        type: 'verification_update',
+        jobId,
+        verifications
+      });
+
+      // Check if we have enough verifications
       if (verifications.length >= 3) {
         const allMatch = verifications.every(v => v.matches === 1);
 
+        let finalState = null;
         if (allMatch) {
           finalState = JobState.VERIFIED;
           addLog(jobId, `Global Consensus: 3 Independent Verifiers Matched Output Hash`, 'success');
@@ -266,25 +273,21 @@ wss.on('connection', (ws) => {
           finalState = JobState.FRAUD;
           addLog(jobId, `FRAUD DETECTED: Verifiers disagree`, 'error');
         }
-      }
 
-      // Update state if needed
-      if (finalState) {
+        // Update state in DB
         const updates = ['state = ?', 'updated_at = ?'];
         const values = [finalState, Date.now()];
         const sql = `UPDATE jobs SET ${updates.join(', ')} WHERE id = ?`;
         const updateStmt = db.prepare(sql);
         updateStmt.run(...values, jobId);
-      }
 
-      // NOW broadcast everything atomically - job state AND verifications together
-      const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
-      broadcastToFrontends({
-        type: 'verification_update',
-        jobId,
-        job,
-        verifications
-      });
+        // Broadcast final job state separately
+        const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+        broadcastToFrontends({
+          type: 'job_update',
+          job
+        });
+      }
 
       return;
     }

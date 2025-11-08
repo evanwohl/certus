@@ -149,10 +149,6 @@ export default function Home() {
       }
 
       if (msg.type === 'verification_update' && msg.jobId === jobId) {
-        // Update both job state AND verifications atomically
-        if (msg.job) {
-          setJob(msg.job);
-        }
         setVerifications(msg.verifications);
       }
     };
