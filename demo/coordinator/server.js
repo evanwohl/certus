@@ -14,6 +14,47 @@ const wss = new WebSocketServer({ server });
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
+// Rate limiting: 10 jobs per IP per minute
+const rateLimits = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = 10; // 10 requests per window
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const key = ip;
+
+  if (!rateLimits.has(key)) {
+    rateLimits.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    return true;
+  }
+
+  const limit = rateLimits.get(key);
+
+  // Reset if window expired
+  if (now > limit.resetAt) {
+    rateLimits.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    return true;
+  }
+
+  // Increment and check
+  limit.count++;
+  if (limit.count > RATE_LIMIT_MAX) {
+    return false;
+  }
+
+  return true;
+}
+
+// Clean up old rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, limit] of rateLimits.entries()) {
+    if (now > limit.resetAt + RATE_LIMIT_WINDOW) {
+      rateLimits.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+
 // SQLite database for job state
 const db = new Database('coordinator/data/jobs.db');
 db.exec(`
@@ -275,6 +316,19 @@ wss.on('connection', (ws) => {
  * Submit new job
  */
 app.post('/api/jobs', async (req, res) => {
+  // Get real IP (handle proxy/nginx)
+  const ip = req.headers['x-forwarded-for']?.split(',')[0] ||
+             req.headers['x-real-ip'] ||
+             req.socket.remoteAddress;
+
+  // Check rate limit
+  if (!checkRateLimit(ip)) {
+    console.log(`[Coordinator] Rate limit exceeded for IP: ${ip}`);
+    return res.status(429).json({
+      error: 'Rate limit exceeded. Maximum 10 jobs per minute.'
+    });
+  }
+
   const { pythonCode, challengeId } = req.body;
 
   if (!pythonCode || pythonCode.trim().length === 0) {

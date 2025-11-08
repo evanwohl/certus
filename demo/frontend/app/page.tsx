@@ -238,6 +238,16 @@ export default function Home() {
       });
 
       const data = await res.json();
+
+      if (!res.ok) {
+        if (res.status === 429) {
+          alert('Rate limit exceeded. Please wait before submitting more jobs.');
+        } else {
+          alert(data.error || 'Failed to submit job');
+        }
+        return;
+      }
+
       setJobId(data.jobId);
     } catch (err) {
       console.error('Failed to submit job:', err);
