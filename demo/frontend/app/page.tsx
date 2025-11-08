@@ -7,7 +7,8 @@ const API_URL = 'http://localhost:4000';
 const WS_URL = 'ws://localhost:4000';
 
 const EXAMPLES = {
-  fibonacci: `# Ultra-fast Fibonacci (20 iterations)
+  fibonacci: `# Fast Fibonacci (20 iterations)
+# ─────────────────────────────────
 # Shows: loops, arithmetic, temporary variables
 # Execution time: <50ms
 n = 20
@@ -19,7 +20,8 @@ for _ in range(n):
     b = temp
 OUTPUT = a  # Result: 6765`,
 
-  pow: `# Proof-of-Work: Find hash with 1 leading zero
+  pow: `# Proof-of-Work: Find Hash with 1 Leading Zero
+# ───────────────────────────────────────────────
 # Shows: SHA256, f-strings, break, hexdigest
 # Expected attempts: ~16 (max 100)
 import hashlib
@@ -34,7 +36,8 @@ while nonce < 100:
     nonce += 1
 OUTPUT = nonce if nonce < 100 else -1`,
 
-  crypto: `# SHA256 single hash verification
+  crypto: `# SHA256 Single Hash Verification
+# ──────────────────────────────────
 # Shows: import hashlib, encode(), hexdigest()
 # Demonstrates cryptographic determinism
 import hashlib
@@ -50,7 +53,8 @@ hex_substring = hex_digest[0:8]
 # Simple conversion for demo display
 OUTPUT = 0`,
 
-  prime: `# Prime factorization (semiprime: 8633 = 89 × 97)
+  prime: `# Prime Factorization (semiprime: 8633 = 89 × 97)
+# ──────────────────────────────────────────────────
 # Shows: modulo, sqrt approximation, conditionals
 # Execution time: <100ms
 n = 8633
@@ -71,7 +75,8 @@ while i <= sqrt_n:
 
 OUTPUT = factor  # Result: 89`,
 
-  collatz: `# Collatz conjecture verification (n=27 → 111 steps)
+  collatz: `# Collatz Conjecture Verification (n=27 → 111 steps)
+# ─────────────────────────────────────────────────────
 # Shows: while loops, conditionals, augmented assignment
 # Mathematical curiosity, deterministic proof
 n = 27
@@ -144,6 +149,10 @@ export default function Home() {
       }
 
       if (msg.type === 'verification_update' && msg.jobId === jobId) {
+        // Update both job state AND verifications atomically
+        if (msg.job) {
+          setJob(msg.job);
+        }
         setVerifications(msg.verifications);
       }
     };
@@ -285,10 +294,10 @@ export default function Home() {
           <div>
             <a href="https://certuscompute.com" target="_blank" rel="noopener noreferrer" className={styles.titleLink}>
               <h1 className={styles.title}>
-                CERTUS<span className={styles.titleAccent}>.</span>
+                CERTUS<span className={styles.titleAccent}> — The Global Computer</span>
               </h1>
             </a>
-            <p className={styles.subtitle}>TRUSTLESS DETERMINISTIC COMPUTE</p>
+            <p className={styles.subtitle}>TRUSTLESS, VERIFIABLE EXECUTION FROM ANY LANGUAGE</p>
           </div>
 
           <div className={styles.stats}>
@@ -422,12 +431,15 @@ export default function Home() {
             </div>
           ) : (
             <div className={styles.theater}>
-              {/* Status indicator */}
-              <div className={styles.statusBar}>
+              {/* Status badge - centered on top */}
+              <div className={styles.statusBadgeContainer}>
                 <div className={`${styles.statusBadge} ${styles[job?.state || 'queued']}`}>
                   {job?.state?.toUpperCase() || 'QUEUED'}
                 </div>
+              </div>
 
+              {/* Hash displays */}
+              <div className={styles.statusBar}>
                 {job?.wasm_hash && (
                   <div className={styles.hashDisplay}>
                     <span className={styles.hashLabel}>Wasm:</span>
@@ -454,7 +466,7 @@ export default function Home() {
                   <h3>Cryptographic Verification ({verifications.length}/3)</h3>
                   {job?.state === 'verified' && verifications.length === 3 ? (
                     <div className={styles.verificationComplete}>
-                      ✓ Consensus reached: All verifiers agree
+                      ✓ Global Consensus: 3 Independent Verifiers Matched Output Hash
                     </div>
                   ) : job?.state === 'fraud' ? (
                     <div className={styles.verificationFraud}>

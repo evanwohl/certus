@@ -210,26 +210,41 @@ wss.on('connection', (ws) => {
       const matchStr = matches ? '✓ MATCH' : '✗ MISMATCH';
       addLog(jobId, `Verifier ${nodeId}: ${matchStr}\nHash: ${outputHash}`);
 
-      // Broadcast verification update immediately
+      // Get all verifications
       const verifications = db.prepare('SELECT * FROM verifications WHERE job_id = ?').all(jobId);
-      broadcastToFrontends({
-        type: 'verification_update',
-        jobId,
-        verifications
-      });
 
-      // Check if we have enough verifications
+      // Check if we have enough verifications FIRST
+      let finalState = null;
       if (verifications.length >= 3) {
         const allMatch = verifications.every(v => v.matches === 1);
 
         if (allMatch) {
-          updateJobState(jobId, JobState.VERIFIED);
-          addLog(jobId, `Consensus reached: 3/3 verifiers agree`, 'success');
+          finalState = JobState.VERIFIED;
+          addLog(jobId, `Global Consensus: 3 Independent Verifiers Matched Output Hash`, 'success');
         } else {
-          updateJobState(jobId, JobState.FRAUD);
+          finalState = JobState.FRAUD;
           addLog(jobId, `FRAUD DETECTED: Verifiers disagree`, 'error');
         }
       }
+
+      // Update state if needed
+      if (finalState) {
+        const updates = ['state = ?', 'updated_at = ?'];
+        const values = [finalState, Date.now()];
+        const sql = `UPDATE jobs SET ${updates.join(', ')} WHERE id = ?`;
+        const updateStmt = db.prepare(sql);
+        updateStmt.run(...values, jobId);
+      }
+
+      // NOW broadcast everything atomically - job state AND verifications together
+      const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+      broadcastToFrontends({
+        type: 'verification_update',
+        jobId,
+        job,
+        verifications
+      });
+
       return;
     }
 
@@ -279,7 +294,7 @@ app.post('/api/jobs', async (req, res) => {
   const now = Date.now();
   stmt.run(jobId, pythonCode, inputHash, JobState.COMPILING, now, now);
 
-  addLog(jobId, 'Job submitted, compiling to Wasm...');
+  addLog(jobId, 'Job received — compiling Python → Wasm...');
 
   // Send to executor for compilation
   if (connections.executor) {

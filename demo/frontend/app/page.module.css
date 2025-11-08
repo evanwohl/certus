@@ -359,6 +359,15 @@
 }
 
 /* Status */
+.statusBadgeContainer {
+  padding: 1rem 2rem;
+  background: var(--pure-white);
+  border-bottom: 2px solid var(--deep-black);
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .statusBar {
   padding: 1rem 2rem;
   background: var(--pure-white);
