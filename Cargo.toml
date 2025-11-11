@@ -6,6 +6,9 @@ members = [
     "demo/python-cli",
     "python-verifier",
 ]
+exclude = [
+    "stylus-executor",
+]
 resolver = "2"
 
 [workspace.package]

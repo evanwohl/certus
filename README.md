@@ -78,6 +78,9 @@ certus/
 │   ├── CertusWasmProof.sol    # Stylus Wasm re-execution
 │   ├── CertusInsurancePool.sol # Executor slashing insurance
 │   └── CertusToken.sol        # CERTUS governance token
+├── stylus-executor/    # Rust on-chain fraud proof verifier
+│   ├── lib.rs          # Stylus contract (Rust to Wasm)
+│   └── ARCHITECTURE.md # Design documentation
 ├── node/               # Rust execution nodes
 │   ├── executor/       # Off-chain compute executor
 │   ├── verifier/       # Independent fraud verifier
@@ -98,13 +101,14 @@ certus/
 
 ### Tech Stack
 
-- **Smart Contracts:** Solidity 0.8.23 (Foundry)
+- **Smart Contracts:** Solidity 0.8.24 (Foundry)
+- **Fraud Proof Verifier:** Rust → Arbitrum Stylus (on-chain Wasm)
 - **Execution Nodes:** Rust (Tokio, Wasmtime 15.0.1, Ethers)
 - **Python Compiler:** Rust (rustpython-parser, wasm-encoder)
 - **Demo:** Node.js (Express, WebSocket, SQLite)
 - **Frontend:** Next.js, TypeScript, Monaco Editor
 - **CLI:** TypeScript (Commander, Ethers v6)
-- **Blockchain:** Arbitrum (Stylus for on-chain Wasm)
+- **Blockchain:** Arbitrum (Stylus for on-chain Wasm execution)
 
 ## Python Verifier
 
@@ -276,6 +280,9 @@ cargo build --release
 # Solidity contracts
 cd contracts && forge build
 
+# Stylus fraud proof verifier
+cd stylus-executor && cargo build --release --target wasm32-unknown-unknown
+
 # TypeScript CLI
 cd cli && npm install && npm run build
 
@@ -331,6 +338,8 @@ See `scripts/README.md` for detailed documentation.
 
 ### Component Documentation
 - **[contracts/README.md](contracts/README.md)** - Solidity contracts, deployment, testing
+- **[stylus-executor/README.md](stylus-executor/README.md)** - On-chain fraud proof verification
+- **[stylus-executor/ARCHITECTURE.md](stylus-executor/ARCHITECTURE.md)** - Determinism design, security analysis
 - **[demo/README.md](demo/README.md)** - Interactive demo setup, API reference, architecture
 - **[python-verifier/README.md](python-verifier/README.md)** - Compiler architecture, language support, API
 - **[scripts/README.md](scripts/README.md)** - Build automation, deployment scripts, utilities
