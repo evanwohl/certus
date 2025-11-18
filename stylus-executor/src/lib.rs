@@ -166,16 +166,15 @@ fn execute_wasm(
         return Err(ExecutionError::OutOfFuel.into());
     }
 
-    let memory_size = (mem_limit as usize).min(10 * 1024 * 1024);
-    let mut interpreter = Interpreter::new(memory_size, fuel_limit);
+    const PAGE_SIZE: usize = 65536;
+    let memory_pages = (mem_limit as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+    let mut interpreter = Interpreter::new(memory_pages, fuel_limit);
 
     if input.is_empty() {
         return Err(ExecutionError::ExecutionFailed.into());
     }
 
-    let opcode = input[0];
-
-    interpreter.execute_opcode(opcode, wasm)
+    interpreter.execute_single_opcode(wasm)
         .map_err(|_| ExecutionError::ExecutionFailed)?;
 
     let state_hash = interpreter.compute_state_hash();
