@@ -24,10 +24,11 @@ pub fn execute(vm: &mut Interpreter, opcode: u8, bytecode: &[u8]) -> Result<(), 
 
 fn op_block(vm: &mut Interpreter, bytecode: &[u8]) -> Result<(), &'static str> {
     let _block_type = read_block_type(vm, bytecode)?;
-    let end_pc = vm.find_matching_end(bytecode)?;
+    let start_pc = vm.get_pc() - 2;
+    let end_pc = vm.find_matching_end(start_pc)?;
 
     vm.push_block(BlockFrame {
-        start_pc: vm.get_pc(),
+        start_pc,
         end_pc,
         stack_height: vm.stack_height(),
         is_loop: false,
@@ -37,8 +38,8 @@ fn op_block(vm: &mut Interpreter, bytecode: &[u8]) -> Result<(), &'static str> {
 
 fn op_loop(vm: &mut Interpreter, bytecode: &[u8]) -> Result<(), &'static str> {
     let _block_type = read_block_type(vm, bytecode)?;
-    let start_pc = vm.get_pc();
-    let end_pc = vm.find_matching_end(bytecode)?;
+    let start_pc = vm.get_pc() - 2;
+    let end_pc = vm.find_matching_end(start_pc)?;
 
     vm.push_block(BlockFrame {
         start_pc,
@@ -52,14 +53,15 @@ fn op_loop(vm: &mut Interpreter, bytecode: &[u8]) -> Result<(), &'static str> {
 fn op_if(vm: &mut Interpreter, bytecode: &[u8]) -> Result<(), &'static str> {
     let _block_type = read_block_type(vm, bytecode)?;
     let condition = vm.pop_i32()?;
+    let start_pc = vm.get_pc() - 2;
 
     if condition == 0 {
         let target = vm.find_else_or_end(bytecode)?;
         vm.set_pc(target);
     } else {
-        let end_pc = vm.find_matching_end(bytecode)?;
+        let end_pc = vm.find_matching_end(start_pc)?;
         vm.push_block(BlockFrame {
-            start_pc: vm.get_pc(),
+            start_pc,
             end_pc,
             stack_height: vm.stack_height(),
             is_loop: false,

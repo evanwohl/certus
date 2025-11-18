@@ -1,10 +1,11 @@
 // Virtual machine core: stack, memory, execution state
 
 use alloc::vec::Vec;
-use sha2::{Sha256, Digest};
 use super::types::{Value, ValueType, CallFrame, BlockFrame};
 use super::leb128::Leb128Reader;
 use super::opcodes;
+use super::state::StateHasher;
+use super::validator::JumpTable;
 use super::{MAX_STACK_DEPTH, MAX_CALL_DEPTH, MAX_BLOCK_DEPTH, MAX_MEMORY_PAGES, PAGE_SIZE};
 
 pub struct Interpreter {
@@ -15,10 +16,11 @@ pub struct Interpreter {
     call_stack: Vec<CallFrame>,
     block_stack: Vec<BlockFrame>,
     fuel: u64,
+    jump_table: JumpTable,
 }
 
 impl Interpreter {
-    pub fn new(memory_pages: usize, fuel: u64) -> Self {
+    pub fn new(memory_pages: usize, fuel: u64, jump_table: JumpTable) -> Self {
         let memory_size = memory_pages * PAGE_SIZE;
         Self {
             stack: Vec::with_capacity(MAX_STACK_DEPTH),
@@ -28,6 +30,7 @@ impl Interpreter {
             call_stack: Vec::with_capacity(MAX_CALL_DEPTH),
             block_stack: Vec::with_capacity(MAX_BLOCK_DEPTH),
             fuel,
+            jump_table,
         }
     }
 
@@ -206,69 +209,19 @@ impl Interpreter {
     }
 
     pub fn compute_state_hash(&self) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-
-        // Stack
-        hasher.update(&[0x01]);
-        hasher.update(&(self.stack.len() as u32).to_le_bytes());
-        for val in &self.stack {
-            match val {
-                Value::I32(v) => {
-                    hasher.update(&[0x7F]);
-                    hasher.update(&v.to_le_bytes());
-                }
-                Value::I64(v) => {
-                    hasher.update(&[0x7E]);
-                    hasher.update(&v.to_le_bytes());
-                }
-            }
-        }
-
-        // Locals
-        hasher.update(&[0x02]);
-        hasher.update(&(self.locals.len() as u32).to_le_bytes());
-        for val in &self.locals {
-            match val {
-                Value::I32(v) => hasher.update(&v.to_le_bytes()),
-                Value::I64(v) => hasher.update(&v.to_le_bytes()),
-            }
-        }
-
-        // Memory sample
-        hasher.update(&[0x03]);
-        let sample_size = self.memory.len().min(1024);
-        hasher.update(&self.memory[..sample_size]);
-
-        // PC and fuel
-        hasher.update(&[0x04]);
-        hasher.update(&self.pc.to_le_bytes());
-        hasher.update(&self.fuel.to_le_bytes());
-
-        let result = hasher.finalize();
-        let mut output = [0u8; 32];
-        output.copy_from_slice(&result);
-        output
+        StateHasher::hash(
+            &self.stack,
+            &self.locals,
+            &self.memory,
+            self.pc,
+            self.fuel,
+            &self.block_stack,
+            &self.call_stack,
+        )
     }
 
-    pub fn find_matching_end(&self, bytecode: &[u8]) -> Result<usize, &'static str> {
-        let mut depth = 1;
-        let mut pc = self.pc;
-
-        while pc < bytecode.len() && depth > 0 {
-            match bytecode[pc] {
-                0x02 | 0x03 | 0x04 => depth += 1,
-                0x0B => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Ok(pc);
-                    }
-                }
-                _ => {}
-            }
-            pc += 1;
-        }
-
-        Err("unmatched block")
+    pub fn find_matching_end(&self, start_pc: usize) -> Result<usize, &'static str> {
+        self.jump_table.get(start_pc).ok_or("block not in jump table")
     }
 
     pub fn find_else_or_end(&self, bytecode: &[u8]) -> Result<usize, &'static str> {
@@ -300,7 +253,8 @@ mod tests {
 
     #[test]
     fn test_stack_operations() {
-        let mut vm = Interpreter::new(1, 1000);
+        use super::super::validator::JumpTable;
+        let mut vm = Interpreter::new(1, 1000, JumpTable::new());
 
         vm.push(Value::I32(42)).unwrap();
         assert_eq!(vm.stack_height(), 1);
@@ -312,7 +266,8 @@ mod tests {
 
     #[test]
     fn test_memory_operations() {
-        let mut vm = Interpreter::new(1, 1000);
+        use super::super::validator::JumpTable;
+        let mut vm = Interpreter::new(1, 1000, JumpTable::new());
 
         vm.store_memory(0, &[1, 2, 3, 4]).unwrap();
         let data = vm.load_memory(0, 4).unwrap();
@@ -321,7 +276,8 @@ mod tests {
 
     #[test]
     fn test_memory_grow() {
-        let mut vm = Interpreter::new(1, 1000);
+        use super::super::validator::JumpTable;
+        let mut vm = Interpreter::new(1, 1000, JumpTable::new());
 
         assert_eq!(vm.memory_size(), 1);
         let old_size = vm.grow_memory(1).unwrap();
@@ -331,11 +287,12 @@ mod tests {
 
     #[test]
     fn test_state_hash_determinism() {
-        let mut vm1 = Interpreter::new(1, 1000);
+        use super::super::validator::JumpTable;
+        let mut vm1 = Interpreter::new(1, 1000, JumpTable::new());
         vm1.push(Value::I32(42)).unwrap();
         let hash1 = vm1.compute_state_hash();
 
-        let mut vm2 = Interpreter::new(1, 1000);
+        let mut vm2 = Interpreter::new(1, 1000, JumpTable::new());
         vm2.push(Value::I32(42)).unwrap();
         let hash2 = vm2.compute_state_hash();
 

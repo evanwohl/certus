@@ -4,7 +4,7 @@
 #![cfg_attr(not(feature = "export-abi"), no_main)]
 extern crate alloc;
 
-mod wasm_interpreter;
+pub mod wasm_interpreter;
 
 use stylus_sdk::{
     alloy_primitives::{U256, B256},
@@ -12,7 +12,7 @@ use stylus_sdk::{
     call::RawCall,
 };
 use alloc::{vec, vec::Vec};
-use wasm_interpreter::Interpreter;
+use wasm_interpreter::{Interpreter, BytecodeValidator};
 
 /// Execution error codes
 #[derive(Debug)]
@@ -166,9 +166,12 @@ fn execute_wasm(
         return Err(ExecutionError::OutOfFuel.into());
     }
 
+    let jump_table = BytecodeValidator::validate(wasm)
+        .map_err(|_| ExecutionError::CompilationFailed)?;
+
     const PAGE_SIZE: usize = 65536;
     let memory_pages = (mem_limit as usize + PAGE_SIZE - 1) / PAGE_SIZE;
-    let mut interpreter = Interpreter::new(memory_pages, fuel_limit);
+    let mut interpreter = Interpreter::new(memory_pages, fuel_limit, jump_table);
 
     if input.is_empty() {
         return Err(ExecutionError::ExecutionFailed.into());
